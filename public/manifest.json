@@ -1,0 +1,11 @@
+{
+  "name": "Anni - deine persönliche Assistentin",
+  "short_name": "Anni",
+  "description": "Sprach-Assistenz für deinen Pflege-Alltag",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FFFFFF",
+  "theme_color": "#FFFFFF",
+  "orientation": "portrait",
+  "icons": []
+}

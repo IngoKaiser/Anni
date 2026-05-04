@@ -1,0 +1,116 @@
+# ─────────────────────────────────────────────────────────────
+# Tenant: Reha-Zentrum Waldblick
+# Reha-Klinik mit Therapie-Schwerpunkt (Orthopädie + Neurologie)
+# ─────────────────────────────────────────────────────────────
+
+tenant:
+  id: reha-waldblick
+  name: "Reha-Zentrum Waldblick"
+  industry: reha-klinik
+  email_domains:
+    - reha-waldblick.de
+    - waldblick-reha.de
+  default_language: de
+  auth_mode: magic_link
+
+branding:
+  app_name: "Waldblick Assistent"
+  primary_color: "#0EA5E9"      # ruhiges Sky-Blau, klinisch-vertrauenswürdig
+  secondary_color: "#E0F2FE"    # sehr helles Blau
+  logo_emoji: "🌲"
+  greeting: "Guten Tag, womit kann ich helfen?"
+
+agent:
+  voice_id: "nova"
+  persona: |
+    Du bist der Sprach-Assistent für Therapeuten und Pflegekräfte im Reha-Zentrum Waldblick.
+    Du hilfst bei Therapie-Doku, Verlaufsbeurteilung und ICD-Codierung.
+    Antworte sachlich und präzise. Verwende medizinische Fachbegriffe korrekt.
+    Bei Schmerzangaben immer NRS-Skala (0-10) verwenden.
+
+tools:
+  - id: therapie_protokoll
+    label: "Therapie-Einheit dokumentieren"
+    description: "Protokolliert eine durchgeführte Therapie-Einheit mit Übungen, Wiederholungen, Patientenreaktion"
+    type: webhook
+    url: "https://mock-pms.example/therapie"
+    enabled_for_roles: [therapeut, pflegefachkraft]
+
+  - id: schmerzskala_erfassen
+    label: "Schmerz-NRS erfassen"
+    description: "Speichert Schmerzwert auf NRS-Skala (0-10) mit Lokalisation und Charakter"
+    type: webhook
+    url: "https://mock-pms.example/schmerz"
+    enabled_for_roles: [therapeut, pflegefachkraft, arzt]
+
+  - id: mobilitaet_assessment
+    label: "Mobilitäts-Assessment"
+    description: "Erfasst Barthel-Index oder Tinetti-Test für Mobilitätsbewertung"
+    type: webhook
+    url: "https://mock-pms.example/assessment"
+    enabled_for_roles: [therapeut, pflegefachkraft]
+
+  - id: lookup_therapieplan
+    label: "Therapieplan abrufen"
+    description: "Aktueller Therapieplan eines Patienten mit verordneten Therapien und Frequenz"
+    type: mcp
+    mcp_server: "https://mock-mcp.example/waldblick-knowledge"
+    enabled_for_roles: [all]
+
+  - id: lookup_diagnosen
+    label: "Diagnosen + ICD"
+    description: "Hauptdiagnose und Nebendiagnosen mit ICD-10-Codes eines Patienten"
+    type: mcp
+    mcp_server: "https://mock-mcp.example/waldblick-knowledge"
+    enabled_for_roles: [all]
+
+  - id: verordnung_pruefen
+    label: "Verordnung prüfen"
+    description: "Prüft ärztliche Verordnung für eine Therapie-Maßnahme"
+    type: mcp
+    mcp_server: "https://mock-mcp.example/waldblick-knowledge"
+    enabled_for_roles: [therapeut, pflegefachkraft]
+
+  - id: verlaufsbericht
+    label: "Verlaufsbericht erstellen"
+    description: "Generiert Wochen-Verlaufsbericht aus dokumentierten Therapie-Einheiten"
+    type: webhook
+    url: "https://mock-pms.example/verlauf"
+    enabled_for_roles: [therapeut, arzt]
+
+  - id: search_leitlinien
+    label: "Reha-Leitlinien"
+    description: "Durchsucht Leitlinien nach Indikation (z.B. nach Hüft-OP, Schlaganfall)"
+    type: mcp
+    mcp_server: "https://mock-mcp.example/waldblick-knowledge"
+    enabled_for_roles: [all]
+
+knowledge_base:
+  - name: "Reha-Leitlinien"
+    type: documents
+    items:
+      - "DGOU_Leitlinien_Orthopaedie.pdf"
+      - "DGN_Leitlinien_Neurologie.pdf"
+      - "Hueft-TEP_Reha-Standard.pdf"
+      - "Schlaganfall_Reha_Pfad.pdf"
+
+roles:
+  - id: arzt
+    label: "Arzt/Ärztin"
+    description: "Voller Zugriff inkl. Verordnungen und Diagnosen"
+
+  - id: therapeut
+    label: "Therapeut/in (Physio, Ergo, Logo)"
+    description: "Therapie-Doku und -Protokollierung"
+
+  - id: pflegefachkraft
+    label: "Pflegefachkraft"
+    description: "Pflegerische Doku, Assessment-Tools"
+
+compliance:
+  data_residency: eu
+  audit_retention_days: 1095       # 3 Jahre, klinische Anforderungen
+  euai_act_disclosure: true
+  betriebsrat_freigabe: true
+  patientendaten_modus: pseudonym
+  ki_disclaimer: "Dieser Sprach-Assistent unterstützt die Dokumentation. Die Verantwortung für medizinische Entscheidungen liegt beim Therapeuten/Arzt."

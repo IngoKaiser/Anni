@@ -1,0 +1,127 @@
+# ─────────────────────────────────────────────────────────────
+# Tenant: Pflegeheim Sonnenblick
+# Stationäre Pflege, ca. 80 Bewohner
+# ─────────────────────────────────────────────────────────────
+
+tenant:
+  id: pflegeheim-sonnenblick
+  name: "Pflegeheim Sonnenblick"
+  industry: pflege-stationaer
+  email_domains:
+    - sonnenblick.de
+    - sonnenblick-pflege.de
+  default_language: de
+  auth_mode: magic_link
+
+branding:
+  app_name: "Sonnenblick Assistent"
+  primary_color: "#F59E0B"      # warmes Sonnenblumen-Gelb
+  secondary_color: "#FEF3C7"    # sehr helles Gelb
+  logo_emoji: "🌻"
+  greeting: "Schön, dass du da bist."
+
+agent:
+  voice_id: "alloy"
+  persona: |
+    Du bist der Sprach-Assistent für die Pflegekräfte im Pflegeheim Sonnenblick.
+    Du hilfst beim hands-free Dokumentieren am Bewohnerbett.
+    Sprich freundlich aber prägnant — die Pflegekraft hat wenig Zeit.
+    Bestätige Aktionen kurz und klar.
+    Bei kritischen Werten alarmiere immer die Schichtleitung.
+
+tools:
+  - id: pms_vitalwerte_speichern
+    label: "Vitalwerte speichern"
+    description: "Speichert Blutdruck, Puls, Temperatur, Sauerstoffsättigung in MediFox"
+    type: webhook
+    url: "https://mock-pms.example/observation"
+    enabled_for_roles: [pflegefachkraft, pflegehelfer]
+    parameters:
+      - name: bewohner
+        type: string
+        required: true
+      - name: blutdruck
+        type: string
+        required: false
+      - name: puls
+        type: number
+        required: false
+
+  - id: pms_beobachtung
+    label: "Beobachtung dokumentieren"
+    description: "Trägt eine pflegerische Beobachtung in die Doku ein"
+    type: webhook
+    url: "https://mock-pms.example/observation"
+    enabled_for_roles: [pflegefachkraft, pflegehelfer]
+
+  - id: lookup_allergien
+    label: "Allergien nachschlagen"
+    description: "Liefert dokumentierte Allergien eines Bewohners"
+    type: mcp
+    mcp_server: "https://mock-mcp.example/sonnenblick-knowledge"
+    enabled_for_roles: [all]
+
+  - id: lookup_medikation
+    label: "Medikation prüfen"
+    description: "Aktuelle Medikation eines Bewohners mit Dosierung und Verabreichungszeiten"
+    type: mcp
+    mcp_server: "https://mock-mcp.example/sonnenblick-knowledge"
+    enabled_for_roles: [all]
+
+  - id: sturzprotokoll
+    label: "Sturzprotokoll erfassen"
+    description: "Legt ein neues Sturzprotokoll mit Sturzort, Verletzungen, Maßnahmen an"
+    type: webhook
+    url: "https://mock-pms.example/sturzprotokoll"
+    enabled_for_roles: [pflegefachkraft]
+
+  - id: uebergabe_notiz
+    label: "Übergabe-Notiz"
+    description: "Hinterlegt eine Notiz für die nächste Schicht"
+    type: webhook
+    url: "https://mock-pms.example/uebergabe"
+    enabled_for_roles: [pflegefachkraft, pflegehelfer]
+
+  - id: alert_schichtleitung
+    label: "Schichtleitung rufen"
+    description: "Alarmiert die diensthabende Schichtleitung bei kritischen Situationen"
+    type: webhook
+    url: "https://mock-pms.example/alert"
+    enabled_for_roles: [pflegefachkraft, pflegehelfer]
+    require_confirmation: true
+
+  - id: search_hausstandards
+    label: "Hausstandards"
+    description: "Durchsucht die Hausstandards (Wundversorgung, Hygiene, Sturzprophylaxe etc.)"
+    type: mcp
+    mcp_server: "https://mock-mcp.example/sonnenblick-knowledge"
+    enabled_for_roles: [all]
+
+knowledge_base:
+  - name: "Hausstandards Sonnenblick"
+    type: documents
+    items:
+      - "Wundversorgung_Standard.pdf"
+      - "Sturzprophylaxe_2024.pdf"
+      - "Hygieneplan.pdf"
+      - "Medikamenten_Handhabung.pdf"
+
+roles:
+  - id: pflegefachkraft
+    label: "Pflegefachkraft"
+    description: "Examinierte Pflegekraft, alle Tools verfügbar"
+
+  - id: pflegehelfer
+    label: "Pflegehelfer/in"
+    description: "Eingeschränkter Tool-Zugriff, kein Sturzprotokoll"
+
+  - id: schichtleitung
+    label: "Schichtleitung"
+    description: "Erweiterte Rechte für Alarme und kritische Aktionen"
+
+compliance:
+  data_residency: eu
+  audit_retention_days: 730        # 2 Jahre, MDK-Anforderung
+  euai_act_disclosure: true        # Voice-AI-Hinweis bei Session-Start
+  betriebsrat_freigabe: true
+  patientendaten_modus: pseudonym  # nur Initialen + Bewohner-ID, keine Namen

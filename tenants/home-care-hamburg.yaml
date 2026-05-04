@@ -1,0 +1,165 @@
+# ─────────────────────────────────────────────────────────────
+# Tenant: Home Care Hamburg
+# Ambulante Pflege & Betreuung — "einfach persönlicher"
+# Schwerpunkt: Begleitung, Demenzbetreuung, Entlastung Angehöriger
+# ─────────────────────────────────────────────────────────────
+
+tenant:
+  id: home-care-hamburg
+  name: "Home Care Hamburg"
+  industry: pflege-ambulant-betreuung
+  email_domains:
+    - homecare-hamburg.de
+    - hc-hamburg.de
+  default_language: de
+  auth_mode: magic_link
+
+branding:
+  app_name: "Home Care Assistent"
+  primary_color: "#9F1239"      # warmes Bordeaux — Geborgenheit, Heimat
+  secondary_color: "#FFE4E6"    # sehr helles Rosé
+  accent_color: "#FCA5A5"       # weiches Lachs-Rosé
+  logo_emoji: "🏡"              # Haus mit Garten — "zuhause"
+  greeting: "Schön, dass Sie da sind."
+  tagline: "Einfach persönlicher."
+
+agent:
+  voice_id: "shimmer"            # warme weibliche Stimme, passt zum Betreuungs-Setting
+  persona: |
+    Du bist der Assistent für Betreuungskräfte von Home Care Hamburg.
+    Wir sind kein klassischer Pflegedienst — wir sind Begleitung im Alltag.
+    Unsere Kräfte verbringen oft mehrere Stunden mit einer betreuten Person,
+    helfen beim Kochen, Spazieren, Demenzbetreuung, Gesellschaft leisten.
+
+    Sprich warmherzig, persönlich, aber effizient. Die Betreuungskraft hat zwischen
+    den Einsätzen wenig Zeit zum Tippen — du nimmst Doku per Sprache auf.
+
+    Bei Beobachtungen zur betreuten Person: erfasse sie respektvoll. Demenz und
+    Alterserscheinungen werden nicht als Defizit beschrieben, sondern als Realität,
+    der wir mit Würde begegnen.
+
+    Bei Notfällen: ruhig bleiben, klar führen, Bereitschaft alarmieren.
+
+tools:
+  - id: einsatz_dokumentieren
+    label: "Einsatz dokumentieren"
+    description: "Dokumentiert einen Betreuungseinsatz — Dauer, Aktivitäten, Zustand der betreuten Person"
+    type: webhook
+    url: "https://mock-pms.example/einsatz"
+    enabled_for_roles: [betreuungskraft, fachkraft]
+
+  - id: kundennotiz
+    label: "Kundennotiz"
+    description: "Persönliche Beobachtung zur betreuten Person — Stimmung, Erlebnisse, Gespräche"
+    type: webhook
+    url: "https://mock-pms.example/notiz"
+    enabled_for_roles: [betreuungskraft, fachkraft]
+
+  - id: demenz_tagesstruktur
+    label: "Tagesstruktur erfassen"
+    description: "Hält Routinen und Tagesablauf bei demenzbetreuten Personen fest — wichtig für Kontinuität"
+    type: webhook
+    url: "https://mock-pms.example/tagesstruktur"
+    enabled_for_roles: [betreuungskraft, fachkraft]
+
+  - id: angehoerige_info
+    label: "Angehörige informieren"
+    description: "Kurze Update-Nachricht an die Familie — was wurde heute gemacht, wie ging es"
+    type: webhook
+    url: "https://mock-pms.example/angehoerige"
+    enabled_for_roles: [betreuungskraft, fachkraft]
+
+  - id: lookup_kunde
+    label: "Kunde nachschlagen"
+    description: "Persönliches Profil — Vorlieben, Lebensgeschichte, Besonderheiten, frühere Notizen"
+    type: mcp
+    mcp_server: "https://mock-mcp.example/homecare-knowledge"
+    enabled_for_roles: [all]
+
+  - id: medikation_pruefen
+    label: "Medikation prüfen"
+    description: "Aktuelle Medikation, Dosierung, Verabreichungszeiten — nur Lesen, Verabreichung durch Fachkraft"
+    type: mcp
+    mcp_server: "https://mock-mcp.example/homecare-knowledge"
+    enabled_for_roles: [fachkraft]
+
+  - id: bereitschaft_kontaktieren
+    label: "Bereitschaft kontaktieren"
+    description: "Kontaktiert die Rufbereitschaft im Büro bei Fragen oder kleineren Problemen"
+    type: webhook
+    url: "https://mock-pms.example/bereitschaft"
+    enabled_for_roles: [all]
+
+  - id: notfall_melden
+    label: "Notfall melden"
+    description: "Echter Notfall — alarmiert PDL und Familie, sendet GPS-Position. Nur in echten Notlagen!"
+    type: webhook
+    url: "https://mock-pms.example/notfall"
+    enabled_for_roles: [all]
+    require_confirmation: true
+
+  - id: search_demenz_tipps
+    label: "Demenz-Begleitung Tipps"
+    description: "Validierte Tipps zum Umgang mit Demenz-Symptomen — Validation, Biografie-Arbeit, Beschäftigung"
+    type: mcp
+    mcp_server: "https://mock-mcp.example/homecare-knowledge"
+    enabled_for_roles: [all]
+
+  - id: naechster_einsatz
+    label: "Nächster Einsatz"
+    description: "Zeigt den nächsten Termin mit Adresse, Kunde und geplanten Aktivitäten"
+    type: mcp
+    mcp_server: "https://mock-mcp.example/homecare-knowledge"
+    enabled_for_roles: [all]
+
+knowledge_base:
+  - name: "Kunden-Profile"
+    type: api_realtime
+    description: "Lebensgeschichte, Vorlieben, Familie, frühere Notizen — die Basis für persönliche Betreuung"
+
+  - name: "Demenz-Wissen"
+    type: documents
+    items:
+      - "Validation_nach_Naomi_Feil.pdf"
+      - "Biografie_Arbeit_Praxis.pdf"
+      - "Umgang_mit_Unruhe_und_Ablehnung.pdf"
+      - "Wenn_Erinnerungen_verblassen.pdf"
+
+  - name: "Hausstandards Home Care"
+    type: documents
+    items:
+      - "Bezugspflege_Konzept.pdf"
+      - "Datenschutz_im_Privathaushalt.pdf"
+      - "Schlüssel_und_Wertsachen.pdf"
+
+roles:
+  - id: betreuungskraft
+    label: "Betreuungskraft"
+    description: "Begleitet, unterstützt im Alltag, leistet Gesellschaft — keine Behandlungspflege"
+
+  - id: fachkraft
+    label: "Pflegefachkraft"
+    description: "Examinierte Kraft mit erweiterten Befugnissen — auch Behandlungspflege und Medikation"
+
+  - id: pdl
+    label: "Pflegedienstleitung"
+    description: "Verantwortlich für Tour-Planung, Qualitätssicherung, Bereitschaftsdienst"
+
+compliance:
+  data_residency: eu
+  audit_retention_days: 730        # 2 Jahre, MDK-Anforderung
+  euai_act_disclosure: true
+  betriebsrat_freigabe: true
+  patientendaten_modus: pseudonym
+  offline_modus: true              # Mobile Use-Case: Doku-Buffer wenn offline
+
+# Hamburg-spezifisch — kann später für regionale Anpassungen genutzt werden
+region:
+  city: "Hamburg"
+  service_area:
+    - "Hamburg-Nord"
+    - "Hamburg-Mitte"
+    - "Eimsbüttel"
+    - "Altona"
+  buero_address: "Tesdorpfstraße 16, 20148 Hamburg"
+  buero_phone: "040 30398-5500"
