@@ -64,11 +64,13 @@ function buildToolSchema(tools: TenantTool[]): any[] {
  * @param tenant Der Tenant des Users
  * @param userRole Die Rolle des Users innerhalb des Tenants
  * @param isDemoUser Wenn true: Web Speech API, kein OpenAI-Token
+ * @param overrides Optionale User-Präferenzen (Voice-ID etc.)
  */
 export async function createVoiceSession(
   tenant: TenantConfig,
   userRole: string,
-  isDemoUser: boolean
+  isDemoUser: boolean,
+  overrides?: { voiceId?: string }
 ): Promise<VoiceSessionDescriptor> {
   const systemPrompt = buildSystemPrompt(tenant, userRole);
   const availableTools = tenant.tools.filter(
@@ -76,20 +78,23 @@ export async function createVoiceSession(
   );
   const tools = buildToolSchema(availableTools);
 
+  // Voice-Auswahl: User-Override > Tenant-Default > 'alloy'
+  // (User-Override wird vom Frontend per localStorage gemanagt
+  // und an dieses Endpoint mitgeschickt)
+  const effectiveVoiceId = overrides?.voiceId || tenant.agent.voice_id || 'alloy';
+
   // Demo-User nutzen IMMER Web Speech API + Mock-Antworten
   if (isDemoUser) {
     return {
       mode: 'demo',
       systemPrompt,
       tools,
-      voiceId: tenant.agent.voice_id,
+      voiceId: effectiveVoiceId,
       language: tenant.tenant.default_language,
     };
   }
 
   // Echter User, aber OpenAI nicht konfiguriert → klar fehlschlagen.
-  // Wir wollen NICHT einen Demo-Dialog vor echten Usern abspielen,
-  // das war ein verwirrender Bug in früheren Versionen.
   if (!process.env.OPENAI_API_KEY) {
     throw new Error(
       'Voice-Backend ist nicht konfiguriert. Bitte den Administrator kontaktieren.'
@@ -105,7 +110,7 @@ export async function createVoiceSession(
     },
     body: JSON.stringify({
       model: 'gpt-4o-realtime-preview-2024-12-17',
-      voice: tenant.agent.voice_id || 'alloy',
+      voice: effectiveVoiceId,
       instructions: systemPrompt,
       input_audio_transcription: { model: 'gpt-4o-mini-transcribe' },
       turn_detection: {
@@ -131,7 +136,7 @@ export async function createVoiceSession(
     ephemeralToken: session.client_secret?.value,
     systemPrompt,
     tools,
-    voiceId: tenant.agent.voice_id,
+    voiceId: effectiveVoiceId,
     language: tenant.tenant.default_language,
   };
 }

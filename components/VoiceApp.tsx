@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import type { PublicTenantConfig } from '@/lib/tenants';
 import { useSpeechSynthesis } from '@/lib/use-speech-synthesis';
+import { useUserSettings, OPENAI_VOICES, LISTEN_TIMEOUT_MIN, LISTEN_TIMEOUT_MAX } from '@/lib/use-user-settings';
 import VoicePicker from './VoicePicker';
 
 type VoiceState = 'idle' | 'connecting' | 'recording' | 'processing' | 'responding' | 'error';
@@ -134,6 +135,13 @@ export default function VoiceApp({ tenant, user }: Props) {
   const currentUserTurnRef = useRef<Turn | null>(null);
   const currentAssistantTurnRef = useRef<Turn | null>(null);
 
+  // Idle-Timer für kontinuierlichen Dialog: nach X Sekunden Stille
+  // wird die Session automatisch geschlossen.
+  const idleTimerRef = useRef<number | null>(null);
+
+  // User-Settings (Voice-Override, Lausch-Timeout)
+  const { settings, update: updateSettings } = useUserSettings();
+
   const primary = tenant.branding.primary_color;
   const secondary = tenant.branding.secondary_color;
   const isDemoUser = user.isDemoUser;
@@ -258,6 +266,11 @@ export default function VoiceApp({ tenant, user }: Props) {
   }, []);
 
   const cleanupRealtime = useCallback(() => {
+    // Idle-Timer canceln, falls einer läuft
+    if (idleTimerRef.current !== null) {
+      window.clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
     if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
@@ -269,7 +282,6 @@ export default function VoiceApp({ tenant, user }: Props) {
       const el = audioElRef.current;
       el.pause();
       el.srcObject = null;
-      // Element auch aus dem DOM entfernen (wir hatten es beim Setup angehängt)
       try { el.remove(); } catch {}
     }
     pcRef.current = null;
@@ -280,57 +292,90 @@ export default function VoiceApp({ tenant, user }: Props) {
   }, []);
 
   /**
-   * Cleanup, der auf das Ende der Audio-Wiedergabe wartet.
-   * Wird nach 'output_audio_buffer.stopped' (Server fertig) aufgerufen,
-   * prüft ob das <audio>-Element wirklich nichts mehr puffert, und cleant
-   * dann erst. Schützt vor abgeschnittenem Audio-Ende.
+   * Idle-Timer-Helfer für kontinuierlichen Dialog.
+   * Startet einen Countdown nach Annis Antwort - wenn der User innerhalb
+   * der konfigurierten Zeit nichts sagt, wird die Session geschlossen.
+   * Wird gecancelt sobald der User wieder spricht (speech_started).
    */
-  const scheduleSafeCleanup = useCallback(() => {
-    const el = audioElRef.current;
-    if (!el) {
+  const clearIdleTimer = useCallback(() => {
+    if (idleTimerRef.current !== null) {
+      window.clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+  }, []);
+
+  const startIdleTimer = useCallback(() => {
+    clearIdleTimer();
+    const timeoutMs = settings.listenTimeoutSec * 1000;
+    idleTimerRef.current = window.setTimeout(() => {
+      // User war zu lange still - Session beenden
       cleanupRealtime();
       setVoiceState('idle');
+    }, timeoutMs);
+  }, [settings.listenTimeoutSec, cleanupRealtime, clearIdleTimer]);
+
+  /**
+   * Wartet darauf, dass der Audio-Buffer auf dem Client fertig ist mit Abspielen,
+   * und kehrt dann in den 'recording'-State zurück, damit kontinuierlicher Dialog
+   * möglich ist. Startet den Idle-Timer.
+   *
+   * Schützt vor abgeschnittenem Audio-Ende, das war ein realer Bug in
+   * früheren Versionen wo cleanup direkt nach response.done lief.
+   */
+  const scheduleReturnToListening = useCallback(() => {
+    const el = audioElRef.current;
+    const finalize = () => {
+      // Session bleibt offen - wir hören weiter zu
+      // Kein cleanupRealtime hier, das passiert nur bei explizitem Abbruch
+      // oder wenn der Idle-Timer abläuft.
+      if (pcRef.current) {
+        // Connection ist noch offen → zurück in recording, Idle-Timer starten
+        setVoiceState('recording');
+        startIdleTimer();
+      } else {
+        // Connection wurde zwischenzeitlich geschlossen → idle
+        setVoiceState('idle');
+      }
+    };
+
+    if (!el) {
+      finalize();
       return;
     }
 
-    // Sicherheits-Polling: bis zu 8 Sekunden warten, dann sicher cleanen
+    // Sicherheits-Polling: bis zu 8 Sekunden warten, dann übergehen
     const startedAt = Date.now();
     const maxWaitMs = 8000;
 
     const check = () => {
       const elapsed = Date.now() - startedAt;
-
-      // Wenn das Audio-Element nicht mehr puffert und nicht spielt: fertig
       const stillPlaying = el && !el.paused && !el.ended;
       const stillBuffering = el && el.buffered.length > 0 &&
         el.currentTime < el.buffered.end(el.buffered.length - 1) - 0.1;
 
       if (!stillPlaying && !stillBuffering) {
-        // Mindestens 500ms Puffer, damit das Ende nicht abgeschnitten wird
         if (elapsed >= 500) {
-          cleanupRealtime();
-          setVoiceState('idle');
+          finalize();
           return;
         }
       }
-
-      // Sicherheits-Timeout: nach 8s definitiv cleanen
       if (elapsed >= maxWaitMs) {
-        cleanupRealtime();
-        setVoiceState('idle');
+        finalize();
         return;
       }
-
       window.setTimeout(check, 200);
     };
-
     window.setTimeout(check, 500);
-  }, [cleanupRealtime]);
+  }, [startIdleTimer]);
+
 
 
   const handleRealtimeEvent = (ev: any) => {
     switch (ev.type) {
       case 'input_audio_buffer.speech_started':
+        // User redet - Idle-Timer abbrechen, sonst würde Session
+        // mitten in der Frage geschlossen
+        clearIdleTimer();
         setVoiceState('recording');
         if (!currentUserTurnRef.current) {
           const turn: Turn = { id: ++idCounter.current, role: 'user', text: '...', timestamp: Date.now() };
@@ -370,7 +415,6 @@ export default function VoiceApp({ tenant, user }: Props) {
               ? { ...t, toolCalls: [...(t.toolCalls || []), { id: toolName, label: tool?.label || toolName }] }
               : t
           ));
-          // Tool-Call an Backend dispatchen
           let args = {};
           try { args = JSON.parse(ev.arguments); } catch {}
           fetch('/api/tools/execute', {
@@ -381,24 +425,24 @@ export default function VoiceApp({ tenant, user }: Props) {
         }
         break;
       case 'response.done':
-        // WICHTIG: response.done bedeutet nur, dass der Server fertig ist
-        // Audio rauszuschicken - NICHT dass der Client fertig ist mit Abspielen.
-        // Cleanup hier wäre zu früh und schneidet die Audioausgabe ab.
-        // Wir setzen nur den Turn-Cursor zurück und warten auf den
-        // 'output_audio_buffer.stopped' Event (siehe unten).
+        // Server ist fertig mit Generieren - aber Audio läuft noch.
+        // Cursor zurücksetzen, der Rest passiert auf output_audio_buffer.stopped.
         currentAssistantTurnRef.current = null;
         break;
       case 'output_audio_buffer.stopped':
-        // Server hat seinen Audio-Buffer komplett geleert. Jetzt muss noch
-        // der Client-seitige Audio-Element ausspielen, was ein paar hundert ms
-        // dauert. Wir geben großzügig 1500ms Puffer und checken dann erst,
-        // ob das Audio-Element wirklich fertig ist.
-        scheduleSafeCleanup();
+        // Audio durchgespielt → zurück in recording, Idle-Timer starten.
+        // Session bleibt offen für nächsten User-Input.
+        scheduleReturnToListening();
         break;
       case 'output_audio_buffer.cleared':
-        // Audio wurde explizit unterbrochen (Interrupt). Sofort cleanen.
-        cleanupRealtime();
-        setVoiceState('idle');
+        // Audio wurde durch User-Interrupt gestoppt → direkt zurück zu recording
+        // (Server fängt schon wieder zu lauschen an, weil Server-VAD aktiv ist)
+        if (pcRef.current) {
+          setVoiceState('recording');
+          startIdleTimer();
+        } else {
+          setVoiceState('idle');
+        }
         break;
       case 'error':
         setError(ev.error?.message || 'Realtime-Fehler');
@@ -416,7 +460,10 @@ export default function VoiceApp({ tenant, user }: Props) {
       const tokenRes = await fetch('/api/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify({
+          // User-Auswahl der Stimme (oder null für Tenant-Default)
+          voiceId: settings.voiceId,
+        }),
       });
 
       if (!tokenRes.ok) {
@@ -516,7 +563,6 @@ export default function VoiceApp({ tenant, user }: Props) {
   // ─────────── Unified Tap-Handler ───────────
   const handleTap = () => {
     // iOS Speech-Engine entsperren - muss synchron im Touch-Event passieren.
-    // Idempotent: nach dem ersten Mal No-Op.
     if (isDemoUser) {
       speech.primeForUserInteraction();
     }
@@ -525,7 +571,7 @@ export default function VoiceApp({ tenant, user }: Props) {
       // Demo-User: simulierter Flow mit Web Speech
       if (voiceState === 'idle' || voiceState === 'error') runDemoFlow();
       else if (voiceState === 'recording') {
-        // Bei Demo: zum Demo-Flow vorrücken
+        // Bei Demo: nichts tun (Demo-Sequenz läuft)
       }
       else if (voiceState === 'responding') {
         stopSpeech();
@@ -533,19 +579,24 @@ export default function VoiceApp({ tenant, user }: Props) {
         setTimeout(() => runDemoFlow(), 200);
       }
     } else {
-      // Echte User: OpenAI Realtime mit Server-VAD
+      // Echte User: OpenAI Realtime mit Server-VAD und kontinuierlichem Dialog
       if (voiceState === 'idle' || voiceState === 'error') {
+        // Session starten - bleibt offen für mehrere Turns
         startRealtimeSession();
       } else if (voiceState === 'recording') {
-        // Server-VAD erkennt Sprachpause selbst - kein manuelles commit nötig.
-        // Tap während Recording ist daher No-Op (oder könnte später als
-        // "Ich bin fertig" Signal genutzt werden, falls VAD träge ist).
-      } else if (voiceState === 'responding') {
-        // Antwort der KI unterbrechen, dann neu starten.
-        interruptRealtimeResponse();
+        // Tap während Recording = User möchte Session beenden
+        // (Server-VAD macht das End-of-Turn, Tap ist explizites "Ich bin fertig")
         cleanupRealtime();
         setVoiceState('idle');
-        setTimeout(() => startRealtimeSession(), 300);
+      } else if (voiceState === 'processing') {
+        // Tap während Verarbeitung = Session abbrechen
+        cleanupRealtime();
+        setVoiceState('idle');
+      } else if (voiceState === 'responding') {
+        // Tap während Antwort = Antwort unterbrechen, aber Session offen lassen
+        // damit User direkt wieder was sagen kann
+        interruptRealtimeResponse();
+        // State wird auf 'recording' gehen via output_audio_buffer.cleared Event
       }
     }
   };
@@ -564,9 +615,9 @@ export default function VoiceApp({ tenant, user }: Props) {
     switch (voiceState) {
       case 'idle': return isDemoUser ? 'Tippen für Demo-Beispiel' : 'Tippen zum Sprechen';
       case 'connecting': return 'Verbinde…';
-      case 'recording': return isDemoUser ? 'Demo läuft…' : 'Sprich jetzt — Pause beendet';
+      case 'recording': return isDemoUser ? 'Demo läuft…' : 'Höre zu — sprich los';
       case 'processing': return 'Verarbeite…';
-      case 'responding': return isDemoUser ? 'Antwortet…' : 'Antwortet — tippen zum Unterbrechen';
+      case 'responding': return isDemoUser ? 'Antwortet…' : 'Antwortet — tippen unterbricht';
       case 'error': return 'Fehler · neu versuchen';
     }
   })();
@@ -693,6 +744,8 @@ export default function VoiceApp({ tenant, user }: Props) {
           user={user}
           primary={primary}
           speech={speech}
+          settings={settings}
+          updateSettings={updateSettings}
           onLogout={handleLogout}
           onClose={() => setShowSettings(false)}
         />
@@ -844,7 +897,7 @@ function EmptyState({ tenant, primary, secondary, isDemoUser }: any) {
 
 /* ─────────── Settings Modal ─────────── */
 
-function SettingsModal({ tenant, user, primary, onLogout, onClose, speech }: any) {
+function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, settings, updateSettings }: any) {
   return (
     <div className="fixed inset-0 z-50 bg-stone-900/30 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div className="bg-white sm:rounded-3xl rounded-t-3xl max-w-md w-full max-h-[90vh] overflow-y-auto shadow-2xl">
@@ -872,7 +925,17 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose, speech }: any
             </div>
           </section>
 
-          {/* Voice-Picker - nur sichtbar wenn Web Speech genutzt wird (Demo-User) */}
+          {/* OpenAI-Voice-Picker für echte User */}
+          {!user.isDemoUser && (
+            <OpenAIVoicePicker
+              tenant={tenant}
+              selectedVoiceId={settings.voiceId}
+              onSelect={(id: string | null) => updateSettings({ voiceId: id })}
+              primary={primary}
+            />
+          )}
+
+          {/* Browser-Voice-Picker für Demo-User */}
           {user.isDemoUser && speech?.isSupported && (
             <section>
               <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
@@ -887,9 +950,7 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose, speech }: any
                 selectedVoiceId={speech.selectedVoiceId}
                 onSelect={speech.selectVoice}
                 onPreview={(id: string | null) => {
-                  // Engine entsperren falls noch nicht passiert
                   speech.primeForUserInteraction();
-                  // selectVoice wirkt asynchron - wir geben dem State-Update einen Tick
                   setTimeout(() => {
                     speech.speak('Hallo, ich bin Anni. So klinge ich.', {
                       rate: 1.0,
@@ -899,6 +960,15 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose, speech }: any
                 primary={primary}
               />
             </section>
+          )}
+
+          {/* Lausch-Timeout: nur für echte User relevant (Demo läuft sequenziell ab) */}
+          {!user.isDemoUser && (
+            <ListenTimeoutSetting
+              valueSec={settings.listenTimeoutSec}
+              onChange={(sec: number) => updateSettings({ listenTimeoutSec: sec })}
+              primary={primary}
+            />
           )}
 
           <section>
@@ -956,5 +1026,126 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose, speech }: any
         </div>
       </div>
     </div>
+  );
+}
+
+/* ─────────── OpenAI Voice Picker (für echte User) ─────────── */
+
+function OpenAIVoicePicker({ tenant, selectedVoiceId, onSelect, primary }: any) {
+  const tenantDefault = tenant.agent.voice_id;
+
+  return (
+    <section>
+      <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
+        <Volume2 size={12} /> Stimme von Anni
+      </h4>
+      <p className="text-[11px] text-stone-500 mb-3">
+        Stimme, mit der Anni mit dir spricht. Wirkt ab der nächsten Session.
+      </p>
+      <div className="space-y-1.5">
+        {/* Tenant-Default Option */}
+        <button
+          onClick={() => onSelect(null)}
+          className="w-full p-3 rounded-2xl border-2 transition flex items-center gap-3 text-left"
+          style={{
+            borderColor: selectedVoiceId === null ? primary : '#E7E5E4',
+            background: selectedVoiceId === null ? `${primary}10` : '#FAFAF9',
+          }}
+        >
+          <div
+            className="w-9 h-9 rounded-2xl flex items-center justify-center shrink-0"
+            style={{ background: selectedVoiceId === null ? primary : '#E7E5E4' }}
+          >
+            <Volume2 size={14} color={selectedVoiceId === null ? '#FFFFFF' : '#78716C'} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold text-stone-800">Standard für {tenant.name}</p>
+            <p className="text-[11px] text-stone-500">
+              {OPENAI_VOICES.find((v: any) => v.id === tenantDefault)?.label || tenantDefault}
+            </p>
+          </div>
+          {selectedVoiceId === null && (
+            <span className="text-[10px] font-semibold" style={{ color: primary }}>aktiv</span>
+          )}
+        </button>
+
+        {/* Alle OpenAI-Stimmen */}
+        {OPENAI_VOICES.map((voice: any) => {
+          const isSelected = voice.id === selectedVoiceId;
+          return (
+            <button
+              key={voice.id}
+              onClick={() => onSelect(voice.id)}
+              className="w-full p-3 rounded-2xl border-2 transition flex items-center gap-3 text-left"
+              style={{
+                borderColor: isSelected ? primary : '#E7E5E4',
+                background: isSelected ? `${primary}10` : '#FAFAF9',
+              }}
+            >
+              <div
+                className="w-9 h-9 rounded-2xl flex items-center justify-center shrink-0 text-[11px] font-semibold"
+                style={{
+                  background: isSelected ? primary : '#E7E5E4',
+                  color: isSelected ? '#FFFFFF' : '#78716C',
+                }}
+              >
+                {voice.label.slice(0, 2)}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-semibold text-stone-800">{voice.label}</p>
+                <p className="text-[11px] text-stone-500">{voice.description}</p>
+              </div>
+              {isSelected && (
+                <span className="text-[10px] font-semibold" style={{ color: primary }}>aktiv</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+/* ─────────── Lausch-Timeout Slider ─────────── */
+
+function ListenTimeoutSetting({ valueSec, onChange, primary }: any) {
+  return (
+    <section>
+      <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
+        <Mic size={12} /> Lausch-Zeit nach Antwort
+      </h4>
+      <p className="text-[11px] text-stone-500 mb-3 leading-relaxed">
+        Wie lange Anni nach einer Antwort weiter zuhört, bevor die Session endet.
+        Du kannst in dieser Zeit einfach weiter reden — Anni antwortet im Dialog.
+      </p>
+      <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4">
+        <div className="flex items-baseline justify-between mb-3">
+          <span className="text-sm text-stone-600">Aktuell:</span>
+          <span className="text-2xl font-bold" style={{ color: primary }}>
+            {valueSec}<span className="text-sm font-normal text-stone-500 ml-1">Sek.</span>
+          </span>
+        </div>
+        <input
+          type="range"
+          min={LISTEN_TIMEOUT_MIN}
+          max={LISTEN_TIMEOUT_MAX}
+          step={1}
+          value={valueSec}
+          onChange={(e) => onChange(parseInt(e.target.value, 10))}
+          className="w-full h-2 rounded-full appearance-none cursor-pointer"
+          style={{
+            background: `linear-gradient(to right, ${primary} 0%, ${primary} ${((valueSec - LISTEN_TIMEOUT_MIN) / (LISTEN_TIMEOUT_MAX - LISTEN_TIMEOUT_MIN)) * 100}%, #E7E5E4 ${((valueSec - LISTEN_TIMEOUT_MIN) / (LISTEN_TIMEOUT_MAX - LISTEN_TIMEOUT_MIN)) * 100}%, #E7E5E4 100%)`,
+            WebkitAppearance: 'none',
+          }}
+        />
+        <div className="flex justify-between mt-1.5 text-[10px] text-stone-400">
+          <span>{LISTEN_TIMEOUT_MIN}s</span>
+          <span>{LISTEN_TIMEOUT_MAX}s</span>
+        </div>
+        <p className="text-[10px] text-stone-400 mt-3 leading-relaxed">
+          Hinweis: längere Lausch-Zeiten erhöhen die OpenAI-Kosten leicht (~0,05 EUR pro Minute Idle-Zeit).
+        </p>
+      </div>
+    </section>
   );
 }
