@@ -4,10 +4,22 @@
  * - Magic Link via Resend (für echte User mit Tenant-Email)
  * - Demo Quick-Login Credentials Provider (für Demo-User)
  *
- * Pro User wird in der Session ein "isDemoUser" Flag gespeichert,
- * das später entscheidet ob OpenAI Realtime oder Web Speech API genutzt wird.
+ * Architektur-Details:
  *
- * Session: JWT, 90 Tage gültig.
+ * 1. Magic Link braucht ZWINGEND einen Database-Adapter (Auth.js speichert
+ *    Verification-Tokens dort). Wir nutzen den offiziellen @auth/neon-adapter.
+ *
+ * 2. Sessions sind trotz Adapter weiter JWT-basiert (strategy: 'jwt').
+ *    Das hat einen wichtigen Grund: Credentials-Provider (Demo-Login) ist
+ *    NICHT mit Database-Sessions kompatibel. JWT erlaubt beides parallel.
+ *
+ * 3. Der Pool MUSS im Request-Handler erstellt werden, nicht modul-global.
+ *    Neon's Postgres kann Pools zwischen Requests nicht halten.
+ *    Daher das Lazy-Pattern: NextAuth(() => ({ ... })).
+ *
+ * 4. Beim ersten Aufruf wird das Auth-Schema lazy angelegt - sonst würde
+ *    der erste Magic-Link fehlschlagen weil die verification_token Tabelle
+ *    fehlt.
  */
 
 import NextAuth, { type DefaultSession } from 'next-auth';
@@ -32,13 +44,6 @@ declare module 'next-auth' {
     isDemoUser?: boolean;
   }
 }
-
-// Hinweis: Wir augmentieren absichtlich NICHT 'next-auth/jwt' als Modul.
-// In Auth.js v5-beta ist das Pfad-Mapping zwischen next-auth und @auth/core
-// nicht stabil (das nested @auth/core in next-auth's eigenem node_modules
-// macht TypeScript Resolution unzuverlässig). Wir nutzen stattdessen
-// einfache Type-Casts in den Callbacks unten - das JWT akzeptiert
-// zur Laufzeit beliebige Felder, die Augmentation ist nur Type-Hint.
 
 // Demo-User - vorab konfiguriert für Demo-Quick-Login
 export const DEMO_USERS = [
@@ -68,96 +73,193 @@ export const DEMO_USERS = [
   },
 ];
 
-export const { handlers, signIn, signOut, auth } = NextAuth({
-  trustHost: true,
-  secret: process.env.AUTH_SECRET,
+/**
+ * Datenbank-URL ermitteln (Vercel/Neon setzen mehrere Varianten).
+ */
+function getDatabaseUrl(): string | null {
+  return (
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL ||
+    process.env.POSTGRES_PRISMA_URL ||
+    null
+  );
+}
 
-  session: {
-    strategy: 'jwt',
-    maxAge: 90 * 24 * 60 * 60, // 90 Tage
-  },
+/**
+ * Legt das Auth.js-Schema in der DB an. Idempotent.
+ * Wird beim ersten Auth-Request lazy aufgerufen.
+ *
+ * Schema basiert auf dem offiziellen @auth/pg-adapter Schema.
+ */
+let schemaInitialized = false;
 
-  pages: {
-    signIn: '/login',
-    verifyRequest: '/verify',
-  },
+async function ensureAuthSchema(pool: any): Promise<void> {
+  if (schemaInitialized) return;
 
-  providers: [
-    // Magic Link (nur aktiv wenn RESEND_API_KEY gesetzt)
-    ...(process.env.RESEND_API_KEY
-      ? [
-          Resend({
-            apiKey: process.env.RESEND_API_KEY,
-            from: process.env.EMAIL_FROM || 'onboarding@resend.dev',
-          }),
-        ]
-      : []),
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS verification_token (
+        identifier TEXT NOT NULL,
+        expires TIMESTAMPTZ NOT NULL,
+        token TEXT NOT NULL,
+        PRIMARY KEY (identifier, token)
+      );
+    `);
 
-    // Demo Quick-Login (immer aktiv - sichtbar oder versteckt regelt das Frontend)
-    Credentials({
-      id: 'demo-quicklogin',
-      name: 'Demo Quick Login',
-      credentials: {
-        demoUserId: { type: 'text' },
-      },
-      async authorize(credentials) {
-        const userId = credentials?.demoUserId as string;
-        const demoUser = DEMO_USERS.find(u => u.id === userId);
-        if (!demoUser) return null;
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS accounts (
+        id SERIAL PRIMARY KEY,
+        "userId" INTEGER NOT NULL,
+        type VARCHAR(255) NOT NULL,
+        provider VARCHAR(255) NOT NULL,
+        "providerAccountId" VARCHAR(255) NOT NULL,
+        refresh_token TEXT,
+        access_token TEXT,
+        expires_at BIGINT,
+        id_token TEXT,
+        scope TEXT,
+        session_state TEXT,
+        token_type TEXT
+      );
+    `);
 
-        return {
-          id: demoUser.id,
-          email: demoUser.email,
-          name: demoUser.name,
-          tenantId: demoUser.tenantId,
-          role: demoUser.role,
-          isDemoUser: true,
-        };
-      },
-    }),
-  ],
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id SERIAL PRIMARY KEY,
+        "userId" INTEGER NOT NULL,
+        expires TIMESTAMPTZ NOT NULL,
+        "sessionToken" VARCHAR(255) NOT NULL
+      );
+    `);
 
-  callbacks: {
-    async signIn({ user, account }) {
-      // Demo-Login ist immer erlaubt
-      if (account?.provider === 'demo-quicklogin') return true;
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255),
+        email VARCHAR(255) UNIQUE,
+        "emailVerified" TIMESTAMPTZ,
+        image TEXT
+      );
+    `);
 
-      // Magic Link: nur für bekannte Tenant-Domains
-      if (!user.email) return false;
-      const tenant = resolveTenantByEmail(user.email);
-      return tenant !== null;
+    schemaInitialized = true;
+  } finally {
+    client.release();
+  }
+}
+
+export const { handlers, signIn, signOut, auth } = NextAuth(async () => {
+  const dbUrl = getDatabaseUrl();
+  let adapter: any = undefined;
+
+  if (dbUrl) {
+    // Pool und Adapter dynamisch im Request-Handler erstellen
+    // (Neon kann Pools zwischen Requests nicht halten)
+    const { Pool } = await import('@neondatabase/serverless');
+    const { default: NeonAdapter } = await import('@auth/neon-adapter');
+
+    const pool = new Pool({ connectionString: dbUrl });
+    await ensureAuthSchema(pool).catch(err => {
+      console.error('[auth] Schema init failed:', err);
+    });
+    adapter = NeonAdapter(pool);
+  }
+
+  return {
+    trustHost: true,
+    secret: process.env.AUTH_SECRET,
+    adapter,
+
+    session: {
+      // JWT-Strategie auch mit Adapter - sonst funktioniert Credentials nicht
+      strategy: 'jwt',
+      maxAge: 90 * 24 * 60 * 60, // 90 Tage
     },
 
-    async jwt({ token, user }) {
-      // token ist JWT, wird aber zur Laufzeit als Plain-Object behandelt.
-      // Type-Cast auf 'any' an Schreibstellen, weil wir das Modul-Augmentation
-      // bewusst weggelassen haben (siehe Kommentar oben).
-      const t = token as any;
-      if (user) {
-        const u = user as any;
-        if (u.tenantId) {
-          t.tenantId = u.tenantId;
-          t.role = u.role;
-          t.isDemoUser = u.isDemoUser ?? false;
-        } else if (user.email) {
-          // Magic-Link User: Tenant via Email-Domain auflösen
-          const tenant = resolveTenantByEmail(user.email);
-          if (tenant) {
-            t.tenantId = tenant.tenant.id;
-            t.role = tenant.roles[0]?.id || 'user';
-            t.isDemoUser = false;
+    pages: {
+      signIn: '/login',
+      verifyRequest: '/verify',
+    },
+
+    providers: [
+      // Magic Link - nur aktiv wenn RESEND_API_KEY UND DB konfiguriert sind.
+      // Ohne DB-Adapter würde der Resend-Provider in "MissingAdapter" laufen.
+      ...(process.env.RESEND_API_KEY && dbUrl
+        ? [
+            Resend({
+              apiKey: process.env.RESEND_API_KEY,
+              from: process.env.EMAIL_FROM || 'onboarding@resend.dev',
+            }),
+          ]
+        : []),
+
+      // Demo Quick-Login - immer aktiv, braucht keine DB
+      Credentials({
+        id: 'demo-quicklogin',
+        name: 'Demo Quick Login',
+        credentials: {
+          demoUserId: { type: 'text' },
+        },
+        async authorize(credentials) {
+          const userId = credentials?.demoUserId as string;
+          const demoUser = DEMO_USERS.find(u => u.id === userId);
+          if (!demoUser) return null;
+
+          return {
+            id: demoUser.id,
+            email: demoUser.email,
+            name: demoUser.name,
+            tenantId: demoUser.tenantId,
+            role: demoUser.role,
+            isDemoUser: true,
+          };
+        },
+      }),
+    ],
+
+    callbacks: {
+      async signIn({ user, account }) {
+        // Demo-Login ist immer erlaubt
+        if (account?.provider === 'demo-quicklogin') return true;
+
+        // Magic Link: nur für bekannte Tenant-Domains
+        if (!user.email) return false;
+        const tenant = resolveTenantByEmail(user.email);
+        return tenant !== null;
+      },
+
+      async jwt({ token, user }) {
+        // token ist JWT, wird zur Laufzeit als Plain-Object behandelt.
+        // Casts auf 'any' weil wir 'next-auth/jwt' nicht augmentieren
+        // (instabiles Pfad-Mapping in v5-beta).
+        const t = token as any;
+        if (user) {
+          const u = user as any;
+          if (u.tenantId) {
+            t.tenantId = u.tenantId;
+            t.role = u.role;
+            t.isDemoUser = u.isDemoUser ?? false;
+          } else if (user.email) {
+            // Magic-Link User: Tenant via Email-Domain auflösen
+            const tenant = resolveTenantByEmail(user.email);
+            if (tenant) {
+              t.tenantId = tenant.tenant.id;
+              t.role = tenant.roles[0]?.id || 'user';
+              t.isDemoUser = false;
+            }
           }
         }
-      }
-      return token;
-    },
+        return token;
+      },
 
-    async session({ session, token }) {
-      const t = token as any;
-      if (t.tenantId) session.user.tenantId = t.tenantId as string;
-      if (t.role) session.user.role = t.role as string;
-      if (typeof t.isDemoUser === 'boolean') session.user.isDemoUser = t.isDemoUser;
-      return session;
+      async session({ session, token }) {
+        const t = token as any;
+        if (t.tenantId) session.user.tenantId = t.tenantId as string;
+        if (t.role) session.user.role = t.role as string;
+        if (typeof t.isDemoUser === 'boolean') session.user.isDemoUser = t.isDemoUser;
+        return session;
+      },
     },
-  },
+  };
 });

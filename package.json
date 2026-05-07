@@ -15,6 +15,7 @@
     "lucide-react": "^0.460.0",
     "next-auth": "5.0.0-beta.25",
     "@auth/core": "^0.37.2",
+    "@auth/neon-adapter": "^1.7.4",
     "@neondatabase/serverless": "^0.10.4",
     "resend": "^4.0.0",
     "js-yaml": "^4.1.0"
