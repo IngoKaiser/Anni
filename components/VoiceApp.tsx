@@ -266,14 +266,67 @@ export default function VoiceApp({ tenant, user }: Props) {
     if (dcRef.current) try { dcRef.current.close(); } catch {}
     if (pcRef.current) try { pcRef.current.close(); } catch {}
     if (audioElRef.current) {
-      audioElRef.current.pause();
-      audioElRef.current.srcObject = null;
+      const el = audioElRef.current;
+      el.pause();
+      el.srcObject = null;
+      // Element auch aus dem DOM entfernen (wir hatten es beim Setup angehängt)
+      try { el.remove(); } catch {}
     }
     pcRef.current = null;
     dcRef.current = null;
     streamRef.current = null;
+    audioElRef.current = null;
     setAudioLevel(0);
   }, []);
+
+  /**
+   * Cleanup, der auf das Ende der Audio-Wiedergabe wartet.
+   * Wird nach 'output_audio_buffer.stopped' (Server fertig) aufgerufen,
+   * prüft ob das <audio>-Element wirklich nichts mehr puffert, und cleant
+   * dann erst. Schützt vor abgeschnittenem Audio-Ende.
+   */
+  const scheduleSafeCleanup = useCallback(() => {
+    const el = audioElRef.current;
+    if (!el) {
+      cleanupRealtime();
+      setVoiceState('idle');
+      return;
+    }
+
+    // Sicherheits-Polling: bis zu 8 Sekunden warten, dann sicher cleanen
+    const startedAt = Date.now();
+    const maxWaitMs = 8000;
+
+    const check = () => {
+      const elapsed = Date.now() - startedAt;
+
+      // Wenn das Audio-Element nicht mehr puffert und nicht spielt: fertig
+      const stillPlaying = el && !el.paused && !el.ended;
+      const stillBuffering = el && el.buffered.length > 0 &&
+        el.currentTime < el.buffered.end(el.buffered.length - 1) - 0.1;
+
+      if (!stillPlaying && !stillBuffering) {
+        // Mindestens 500ms Puffer, damit das Ende nicht abgeschnitten wird
+        if (elapsed >= 500) {
+          cleanupRealtime();
+          setVoiceState('idle');
+          return;
+        }
+      }
+
+      // Sicherheits-Timeout: nach 8s definitiv cleanen
+      if (elapsed >= maxWaitMs) {
+        cleanupRealtime();
+        setVoiceState('idle');
+        return;
+      }
+
+      window.setTimeout(check, 200);
+    };
+
+    window.setTimeout(check, 500);
+  }, [cleanupRealtime]);
+
 
   const handleRealtimeEvent = (ev: any) => {
     switch (ev.type) {
@@ -328,11 +381,24 @@ export default function VoiceApp({ tenant, user }: Props) {
         }
         break;
       case 'response.done':
+        // WICHTIG: response.done bedeutet nur, dass der Server fertig ist
+        // Audio rauszuschicken - NICHT dass der Client fertig ist mit Abspielen.
+        // Cleanup hier wäre zu früh und schneidet die Audioausgabe ab.
+        // Wir setzen nur den Turn-Cursor zurück und warten auf den
+        // 'output_audio_buffer.stopped' Event (siehe unten).
         currentAssistantTurnRef.current = null;
-        setTimeout(() => {
-          cleanupRealtime();
-          setVoiceState('idle');
-        }, 800);
+        break;
+      case 'output_audio_buffer.stopped':
+        // Server hat seinen Audio-Buffer komplett geleert. Jetzt muss noch
+        // der Client-seitige Audio-Element ausspielen, was ein paar hundert ms
+        // dauert. Wir geben großzügig 1500ms Puffer und checken dann erst,
+        // ob das Audio-Element wirklich fertig ist.
+        scheduleSafeCleanup();
+        break;
+      case 'output_audio_buffer.cleared':
+        // Audio wurde explizit unterbrochen (Interrupt). Sofort cleanen.
+        cleanupRealtime();
+        setVoiceState('idle');
         break;
       case 'error':
         setError(ev.error?.message || 'Realtime-Fehler');
@@ -376,8 +442,23 @@ export default function VoiceApp({ tenant, user }: Props) {
 
       const audioEl = document.createElement('audio');
       audioEl.autoplay = true;
+      // iOS Safari: ohne playsinline wird das Audio im Vollbild abgespielt oder
+      // gar nicht. Außerdem hilft 'controls=false' bei manchen Mobile-Browsern.
+      audioEl.setAttribute('playsinline', 'true');
+      audioEl.setAttribute('webkit-playsinline', 'true');
+      // WICHTIG: Element MUSS im DOM hängen, sonst pausiert/garbage-collected
+      // der Browser das Element früh - genau das verursacht abgeschnittenes Audio.
+      audioEl.style.display = 'none';
+      document.body.appendChild(audioEl);
       audioElRef.current = audioEl;
-      pc.ontrack = (e) => { audioEl.srcObject = e.streams[0]; };
+      pc.ontrack = (e) => {
+        audioEl.srcObject = e.streams[0];
+        // Sicherheitshalber explizit play() aufrufen - autoplay kann auf
+        // mobilen Browsern manchmal überstimmt werden.
+        audioEl.play().catch(err => {
+          console.warn('[realtime] audio play() blocked:', err);
+        });
+      };
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -412,12 +493,24 @@ export default function VoiceApp({ tenant, user }: Props) {
     }
   };
 
-  const commitRealtimeRecording = () => {
+  /**
+   * Unterbricht eine laufende Antwort der KI. Wir nutzen Server-VAD,
+   * also muss der User nicht manuell committen - der Server erkennt selbst,
+   * wann der Nutzer fertig ist mit Sprechen.
+   *
+   * Diese Funktion wird nur aufgerufen, wenn der User aktiv abbrechen will
+   * (z.B. wenn die KI gerade antwortet und der User dazwischenredet).
+   */
+  const interruptRealtimeResponse = () => {
     const dc = dcRef.current;
     if (!dc || dc.readyState !== 'open') return;
-    dc.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
-    dc.send(JSON.stringify({ type: 'response.create' }));
-    setVoiceState('processing');
+    try {
+      dc.send(JSON.stringify({ type: 'response.cancel' }));
+      // Audio-Buffer auf Server-Seite leeren (wird mit output_audio_buffer.cleared bestätigt)
+      dc.send(JSON.stringify({ type: 'output_audio_buffer.clear' }));
+    } catch (err) {
+      console.warn('[realtime] interrupt failed:', err);
+    }
   };
 
   // ─────────── Unified Tap-Handler ───────────
@@ -440,13 +533,19 @@ export default function VoiceApp({ tenant, user }: Props) {
         setTimeout(() => runDemoFlow(), 200);
       }
     } else {
-      // Echte User: OpenAI Realtime
-      if (voiceState === 'idle' || voiceState === 'error') startRealtimeSession();
-      else if (voiceState === 'recording') commitRealtimeRecording();
-      else if (voiceState === 'responding') {
+      // Echte User: OpenAI Realtime mit Server-VAD
+      if (voiceState === 'idle' || voiceState === 'error') {
+        startRealtimeSession();
+      } else if (voiceState === 'recording') {
+        // Server-VAD erkennt Sprachpause selbst - kein manuelles commit nötig.
+        // Tap während Recording ist daher No-Op (oder könnte später als
+        // "Ich bin fertig" Signal genutzt werden, falls VAD träge ist).
+      } else if (voiceState === 'responding') {
+        // Antwort der KI unterbrechen, dann neu starten.
+        interruptRealtimeResponse();
         cleanupRealtime();
         setVoiceState('idle');
-        setTimeout(() => startRealtimeSession(), 200);
+        setTimeout(() => startRealtimeSession(), 300);
       }
     }
   };
@@ -465,9 +564,9 @@ export default function VoiceApp({ tenant, user }: Props) {
     switch (voiceState) {
       case 'idle': return isDemoUser ? 'Tippen für Demo-Beispiel' : 'Tippen zum Sprechen';
       case 'connecting': return 'Verbinde…';
-      case 'recording': return isDemoUser ? 'Demo läuft…' : 'Sprich jetzt';
+      case 'recording': return isDemoUser ? 'Demo läuft…' : 'Sprich jetzt — Pause beendet';
       case 'processing': return 'Verarbeite…';
-      case 'responding': return 'Antwortet…';
+      case 'responding': return isDemoUser ? 'Antwortet…' : 'Antwortet — tippen zum Unterbrechen';
       case 'error': return 'Fehler · neu versuchen';
     }
   })();
