@@ -35,9 +35,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(voiceSession);
   } catch (err: any) {
     console.error('[session] Failed:', err);
+    const message = err?.message || 'Session creation failed';
+
+    // Konfigurations-Fehler: Voice-Backend nicht aktiviert.
+    // 503 Service Unavailable ist semantisch korrekter als 500.
+    const isConfigError = message.includes('nicht konfiguriert') ||
+                          message.includes('nicht aktiviert');
+
     return NextResponse.json(
-      { error: err?.message || 'Session creation failed' },
-      { status: 500 }
+      { error: message, code: isConfigError ? 'voice_backend_unavailable' : 'session_failed' },
+      { status: isConfigError ? 503 : 500 }
     );
   }
 }

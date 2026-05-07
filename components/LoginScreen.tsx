@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { signIn } from 'next-auth/react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Mail, ArrowRight, Heart, Zap } from 'lucide-react';
+import { Mail, ArrowRight, Heart, Zap, AlertCircle, RefreshCw } from 'lucide-react';
 
 interface DemoUser {
   id: string;
@@ -25,10 +25,51 @@ interface DemoTenant {
   };
 }
 
+/**
+ * Übersetzt Auth.js-Error-Codes in nutzerfreundliche deutsche Texte.
+ * Auth.js wirft hauptsächlich diese Codes:
+ *   - 'Configuration': Server-Misskonfiguration (AUTH_SECRET, RESEND_API_KEY etc.)
+ *   - 'Verification': Token ungültig oder abgelaufen
+ *   - 'EmailSignInError': Resend konnte Email nicht versenden
+ *   - 'AccessDenied': Domain nicht freigeschaltet (signIn-Callback returned false)
+ *   - 'CallbackRouteError': Magic-Link-Klick gescheitert
+ */
+function translateAuthError(code: string): string {
+  if (!code) return 'Unbekannter Fehler beim Anmelden.';
+
+  const c = code.toLowerCase();
+
+  if (c.includes('emailsignin') || c.includes('email')) {
+    return 'Die Email konnte nicht versendet werden. Häufige Ursachen: ' +
+           'Resend-API-Key ist ungültig, oder die Absender-Domain ist nicht ' +
+           'in Resend verifiziert. Bitte erneut versuchen oder den Administrator kontaktieren.';
+  }
+  if (c.includes('verification')) {
+    return 'Der Anmelde-Link ist abgelaufen oder ungültig. ' +
+           'Bitte einen neuen Link anfordern.';
+  }
+  if (c.includes('accessdenied')) {
+    return 'Diese Email-Domain ist nicht für Anni freigeschaltet. ' +
+           'Bitte den Administrator kontaktieren.';
+  }
+  if (c.includes('configuration')) {
+    return 'Der Server ist nicht korrekt konfiguriert. ' +
+           'Bitte den Administrator kontaktieren.';
+  }
+  if (c.includes('callback')) {
+    return 'Beim Verarbeiten des Anmelde-Links ist ein Fehler aufgetreten. ' +
+           'Bitte erneut versuchen.';
+  }
+  // Fallback: technischen Code zumindest mit anzeigen
+  return `Anmeldung fehlgeschlagen (${code}). Bitte erneut versuchen.`;
+}
+
 export default function LoginScreen() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const isDemoParam = searchParams.get('demo') === '1';
+  // Auth.js redirectet bei Fehlern hierher mit ?error=...
+  const urlError = searchParams.get('error');
 
   const [email, setEmail] = useState('');
   const [error, setError] = useState('');
@@ -49,6 +90,16 @@ export default function LoginScreen() {
       .then(setInfo)
       .catch(() => {});
   }, [isDemoParam]);
+
+  // Wenn Auth.js mit ?error=... redirectet, übernehmen wir den Fehler
+  // sofort in den State - so sieht der User die Meldung direkt.
+  useEffect(() => {
+    if (urlError) {
+      setError(translateAuthError(urlError));
+      // URL säubern - sonst bleibt der Error-Param beim Reload erhalten
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, [urlError]);
 
   const handleMagicLink = async () => {
     setError('');
@@ -74,9 +125,31 @@ export default function LoginScreen() {
 
     setSubmitting(true);
     try {
-      await signIn('resend', { email, callbackUrl: '/' });
+      // redirect: false ist wichtig - sonst landet man auf der generischen
+      // Auth.js Error-Page wenn Resend fehlschlägt (z.B. unverifizierte Domain).
+      const result = await signIn('resend', {
+        email,
+        redirect: false,
+        callbackUrl: '/',
+      });
+
+      // Auth.js v5: bei Erfolg gibt es ein 'ok: true' und 'url' zur Verify-Seite
+      if (result?.error) {
+        // Bekannte Auth.js-Error-Codes übersetzen
+        const friendly = translateAuthError(result.error);
+        setError(friendly);
+        setSubmitting(false);
+        return;
+      }
+
+      // Erfolg: zur Verify-Seite weiterleiten (kommt aus result.url)
+      if (result?.url) {
+        router.push(result.url);
+      } else {
+        router.push('/verify');
+      }
     } catch (err: any) {
-      setError(err?.message || 'Fehler beim Senden des Anmelde-Links');
+      setError(translateAuthError(err?.message || ''));
       setSubmitting(false);
     }
   };
@@ -143,8 +216,25 @@ export default function LoginScreen() {
           </div>
 
           {error && (
-            <div className="mt-3 px-3 py-2 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700">
-              {error}
+            <div className="mt-3 rounded-2xl bg-rose-50 border border-rose-200 p-3">
+              <div className="flex items-start gap-2.5">
+                <AlertCircle size={16} className="text-rose-500 flex-shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-rose-800 mb-0.5">
+                    Anmeldung fehlgeschlagen
+                  </p>
+                  <p className="text-xs text-rose-700 leading-relaxed">
+                    {error}
+                  </p>
+                  <button
+                    onClick={() => setError('')}
+                    className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-rose-700 hover:text-rose-800"
+                  >
+                    <RefreshCw size={11} />
+                    Erneut versuchen
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 

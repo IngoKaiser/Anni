@@ -359,11 +359,13 @@ export default function VoiceApp({ tenant, user }: Props) {
       }
       const session = await tokenRes.json();
 
-      // Wenn Backend "demo" zurückgibt, fall zurück auf Web Speech
+      // Wenn Backend "demo" zurückgibt, ist das ein Konfigurationsfehler:
+      // Echte User dürfen nie Demo-Inhalte sehen. Wir zeigen eine klare
+      // Meldung statt stillschweigend Demo-Dialoge abzuspielen.
       if (session.mode === 'demo') {
-        setVoiceState('idle');
-        runDemoFlow();
-        return;
+        throw new Error(
+          'Sprach-Backend ist nicht aktiviert. Bitte einen Administrator kontaktieren.'
+        );
       }
 
       const ephemeralKey = session.ephemeralToken;

@@ -4,16 +4,26 @@ import { getAllTenants } from '@/lib/tenants';
 
 export const runtime = 'nodejs';
 
-export async function GET(req: NextRequest) {
-  // Demo-Login wird in zwei Fällen sichtbar gemacht:
-  // 1. DEMO_LOGIN_VISIBLE=true in den ENV-Variablen
-  // 2. URL-Parameter ?demo=1 im Request
-  // (Demo-Login funktioniert immer wenn man die User-IDs kennt - das ist das verstecken)
-  const demoVisibleByEnv = process.env.DEMO_LOGIN_VISIBLE === 'true';
-  const demoVisibleByParam = req.nextUrl.searchParams.get('demo') === '1';
-  const showDemoLogin = demoVisibleByEnv || demoVisibleByParam;
+/**
+ * Sichtbarkeit der Demo-Login-Buttons:
+ *
+ * - URL-Parameter ?demo=1 hat IMMER Vorrang (explizit gesetzt)
+ * - URL-Parameter ?demo=0 hat ebenfalls Vorrang (explizit ausgeschaltet)
+ * - Sonst: Env-Variable DEMO_LOGIN_VISIBLE entscheidet
+ *
+ * Empfehlung für Production-Deployments: DEMO_LOGIN_VISIBLE nicht setzen
+ * oder explizit auf "false". Demo-Sessions öffnest du dann mit ?demo=1.
+ */
+function isDemoLoginVisible(req: NextRequest): boolean {
+  const param = req.nextUrl.searchParams.get('demo');
+  if (param === '1') return true;
+  if (param === '0') return false;
+  return process.env.DEMO_LOGIN_VISIBLE === 'true';
+}
 
-  // Liste der Tenants für Login-Footer
+export async function GET(req: NextRequest) {
+  const showDemoLogin = isDemoLoginVisible(req);
+
   const tenants = getAllTenants().map(t => ({
     id: t.tenant.id,
     name: t.tenant.name,
@@ -26,7 +36,7 @@ export async function GET(req: NextRequest) {
     },
   }));
 
-  // Demo-User nur ausgeben wenn Demo sichtbar
+  // Demo-User nur ausgeben wenn Demo sichtbar ist
   const demoUsers = showDemoLogin
     ? DEMO_USERS.map(u => ({
         id: u.id,

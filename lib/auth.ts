@@ -180,6 +180,9 @@ export const { handlers, signIn, signOut, auth } = NextAuth(async () => {
     pages: {
       signIn: '/login',
       verifyRequest: '/verify',
+      // Error-Seite ist /login - dort kann LoginScreen den ?error= Parameter lesen
+      // und eine schöne Meldung anzeigen, statt der hässlichen Auth.js-Default-Page.
+      error: '/login',
     },
 
     providers: [

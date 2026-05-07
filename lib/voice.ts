@@ -76,8 +76,8 @@ export async function createVoiceSession(
   );
   const tools = buildToolSchema(availableTools);
 
-  // Demo-User: nutzen immer Web Speech API
-  if (isDemoUser || !process.env.OPENAI_API_KEY) {
+  // Demo-User nutzen IMMER Web Speech API + Mock-Antworten
+  if (isDemoUser) {
     return {
       mode: 'demo',
       systemPrompt,
@@ -85,6 +85,15 @@ export async function createVoiceSession(
       voiceId: tenant.agent.voice_id,
       language: tenant.tenant.default_language,
     };
+  }
+
+  // Echter User, aber OpenAI nicht konfiguriert → klar fehlschlagen.
+  // Wir wollen NICHT einen Demo-Dialog vor echten Usern abspielen,
+  // das war ein verwirrender Bug in früheren Versionen.
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error(
+      'Voice-Backend ist nicht konfiguriert. Bitte den Administrator kontaktieren.'
+    );
   }
 
   // Echte User mit konfiguriertem OpenAI: Realtime API
