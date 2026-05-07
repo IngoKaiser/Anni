@@ -135,6 +135,12 @@ export default function VoiceApp({ tenant, user }: Props) {
   const currentUserTurnRef = useRef<Turn | null>(null);
   const currentAssistantTurnRef = useRef<Turn | null>(null);
 
+  // Tracking der aktuellen Server-Response-ID, damit interrupt nur dann
+  // 'response.cancel' sendet wenn eine Response wirklich aktiv ist.
+  // Wird auf die ID gesetzt bei 'response.created' und auf null geräumt
+  // bei 'response.done' oder nach erfolgtem cancel.
+  const activeResponseIdRef = useRef<string | null>(null);
+
   // Idle-Timer für kontinuierlichen Dialog: nach X Sekunden Stille
   // wird die Session automatisch geschlossen.
   const idleTimerRef = useRef<number | null>(null);
@@ -396,6 +402,8 @@ export default function VoiceApp({ tenant, user }: Props) {
       case 'response.created':
         const assistTurn: Turn = { id: ++idCounter.current, role: 'assistant', text: '', timestamp: Date.now() };
         currentAssistantTurnRef.current = assistTurn;
+        // Aktive Response-ID merken für sauberen Interrupt
+        activeResponseIdRef.current = ev.response?.id || 'pending';
         setTurns(prev => [...prev, assistTurn]);
         setVoiceState('responding');
         break;
@@ -425,9 +433,10 @@ export default function VoiceApp({ tenant, user }: Props) {
         }
         break;
       case 'response.done':
-        // Server ist fertig mit Generieren - aber Audio läuft noch.
-        // Cursor zurücksetzen, der Rest passiert auf output_audio_buffer.stopped.
+        // Server ist fertig mit Generieren - Response-ID räumen damit
+        // ein nachträglicher Tap nicht mehr cancellt.
         currentAssistantTurnRef.current = null;
+        activeResponseIdRef.current = null;
         break;
       case 'output_audio_buffer.stopped':
         // Audio durchgespielt → zurück in recording, Idle-Timer starten.
@@ -437,6 +446,7 @@ export default function VoiceApp({ tenant, user }: Props) {
       case 'output_audio_buffer.cleared':
         // Audio wurde durch User-Interrupt gestoppt → direkt zurück zu recording
         // (Server fängt schon wieder zu lauschen an, weil Server-VAD aktiv ist)
+        activeResponseIdRef.current = null;
         if (pcRef.current) {
           setVoiceState('recording');
           startIdleTimer();
@@ -445,9 +455,24 @@ export default function VoiceApp({ tenant, user }: Props) {
         }
         break;
       case 'error':
-        setError(ev.error?.message || 'Realtime-Fehler');
-        setVoiceState('error');
-        cleanupRealtime();
+        // Differenzierung zwischen kritischen und harmlosen Fehlern.
+        // 'Cancellation failed: no active response found' ist eine Race-Condition
+        // (User hat unterbrochen genau in dem Moment wo Response fertig wurde) -
+        // kein Grund die ganze Session zu schließen.
+        const errMsg = ev.error?.message || 'Realtime-Fehler';
+        const isHarmless =
+          errMsg.includes('no active response') ||
+          errMsg.includes('Cancellation failed') ||
+          ev.error?.code === 'response_cancel_not_active';
+
+        if (isHarmless) {
+          // Stille loggen, Session läuft weiter
+          console.warn('[realtime] harmless error ignored:', errMsg);
+        } else {
+          setError(errMsg);
+          setVoiceState('error');
+          cleanupRealtime();
+        }
         break;
     }
   };
@@ -541,20 +566,34 @@ export default function VoiceApp({ tenant, user }: Props) {
   };
 
   /**
-   * Unterbricht eine laufende Antwort der KI. Wir nutzen Server-VAD,
-   * also muss der User nicht manuell committen - der Server erkennt selbst,
-   * wann der Nutzer fertig ist mit Sprechen.
+   * Unterbricht eine laufende Antwort der KI.
    *
-   * Diese Funktion wird nur aufgerufen, wenn der User aktiv abbrechen will
-   * (z.B. wenn die KI gerade antwortet und der User dazwischenredet).
+   * Wichtig: Wir tracken die aktuelle response-ID server-side, weil
+   * 'response.cancel' nur sinnvoll ist solange eine Response wirklich aktiv
+   * ist. Sobald response.done eintrifft, gibt es nichts mehr zu cancellen
+   * - selbst wenn das Audio noch ausspielt (das wird über output_audio_buffer.clear
+   * separat gestoppt).
+   *
+   * Reihenfolge ist wichtig:
+   * 1. output_audio_buffer.clear → User hört sofort Stille
+   * 2. response.cancel → nur wenn noch nicht response.done eingetroffen ist
+   *
+   * Idempotent: zweiter Aufruf ist No-Op (verhindert "Cancellation failed"-Fehler)
    */
   const interruptRealtimeResponse = () => {
     const dc = dcRef.current;
     if (!dc || dc.readyState !== 'open') return;
+
     try {
-      dc.send(JSON.stringify({ type: 'response.cancel' }));
-      // Audio-Buffer auf Server-Seite leeren (wird mit output_audio_buffer.cleared bestätigt)
+      // 1. Audio-Buffer immer leeren - das ist immer sicher und sofort wirksam
       dc.send(JSON.stringify({ type: 'output_audio_buffer.clear' }));
+
+      // 2. Response cancellen NUR wenn eine aktive ID gesetzt ist
+      // (wird auf null gesetzt sobald response.done eintrifft oder bereits gecancelt)
+      if (activeResponseIdRef.current) {
+        dc.send(JSON.stringify({ type: 'response.cancel' }));
+        activeResponseIdRef.current = null;
+      }
     } catch (err) {
       console.warn('[realtime] interrupt failed:', err);
     }
@@ -1034,19 +1073,120 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, setti
 function OpenAIVoicePicker({ tenant, selectedVoiceId, onSelect, primary }: any) {
   const tenantDefault = tenant.agent.voice_id;
 
+  // Welche Stimme lädt gerade eine Probe (für Loading-Spinner)
+  const [previewLoadingFor, setPreviewLoadingFor] = useState<string | null>(null);
+
+  // Recycelbares Audio-Element + Abort-Controller für vorherige Proben
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const previewAbortRef = useRef<AbortController | null>(null);
+
+  // Beim Unmount aufräumen
+  useEffect(() => {
+    return () => {
+      previewAbortRef.current?.abort();
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+        previewAudioRef.current.src = '';
+        try { previewAudioRef.current.remove(); } catch {}
+      }
+    };
+  }, []);
+
+  /**
+   * Probe einer Stimme abspielen.
+   *
+   * Bricht alle vorherigen Proben ab (User klickt schnell durch),
+   * lädt MP3 vom /api/tts-preview Endpoint, spielt direkt ab.
+   *
+   * Bei Fehler: still loggen. Probe ist Komfort, kein kritischer Pfad -
+   * wir wollen keinen roten Banner werfen wenn TTS-API mal hakt.
+   */
+  const playPreview = async (voiceId: string) => {
+    // Vorherige Probe abbrechen
+    previewAbortRef.current?.abort();
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      previewAudioRef.current.src = '';
+    }
+
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
+    setPreviewLoadingFor(voiceId);
+
+    try {
+      const res = await fetch('/api/tts-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          voice: voiceId,
+          // Kurzer deutscher Satz, der typische Klangmerkmale der Stimme zeigt
+          text: 'Hallo, ich bin Anni. So klinge ich.',
+        }),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        console.warn('[voice-preview] failed:', res.status);
+        return;
+      }
+
+      const blob = await res.blob();
+      // Wenn zwischenzeitlich abgebrochen wurde, hier raus
+      if (controller.signal.aborted) return;
+
+      const url = URL.createObjectURL(blob);
+
+      // Audio-Element wiederverwenden wenn möglich
+      let audio = previewAudioRef.current;
+      if (!audio) {
+        audio = new Audio();
+        audio.setAttribute('playsinline', 'true');
+        previewAudioRef.current = audio;
+      }
+      // Cleanup vorherige Object-URL nach Wiedergabe
+      audio.onended = () => URL.revokeObjectURL(url);
+      audio.onerror = () => URL.revokeObjectURL(url);
+      audio.src = url;
+      await audio.play().catch(err => {
+        console.warn('[voice-preview] play failed:', err);
+      });
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        console.warn('[voice-preview] error:', err);
+      }
+    } finally {
+      // Loading-State nur räumen wenn das die aktuelle Probe ist
+      // (sonst überschreibt diese das State des nächsten Klicks)
+      if (previewAbortRef.current === controller) {
+        setPreviewLoadingFor(null);
+      }
+    }
+  };
+
+  const handleSelect = (id: string | null) => {
+    onSelect(id);
+    // Bei Auswahl gleich Probe abspielen - außer bei Default
+    // (für Default nehmen wir die Tenant-Voice-ID)
+    const voiceToPreview = id || tenantDefault;
+    if (voiceToPreview) {
+      playPreview(voiceToPreview);
+    }
+  };
+
   return (
     <section>
       <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
         <Volume2 size={12} /> Stimme von Anni
       </h4>
       <p className="text-[11px] text-stone-500 mb-3">
-        Stimme, mit der Anni mit dir spricht. Wirkt ab der nächsten Session.
+        Tippe eine Stimme an, um sie sofort zu hören. Auswahl wirkt ab der nächsten Session.
       </p>
       <div className="space-y-1.5">
         {/* Tenant-Default Option */}
         <button
-          onClick={() => onSelect(null)}
-          className="w-full p-3 rounded-2xl border-2 transition flex items-center gap-3 text-left"
+          onClick={() => handleSelect(null)}
+          disabled={previewLoadingFor !== null}
+          className="w-full p-3 rounded-2xl border-2 transition flex items-center gap-3 text-left disabled:opacity-60"
           style={{
             borderColor: selectedVoiceId === null ? primary : '#E7E5E4',
             background: selectedVoiceId === null ? `${primary}10` : '#FAFAF9',
@@ -1056,7 +1196,11 @@ function OpenAIVoicePicker({ tenant, selectedVoiceId, onSelect, primary }: any) 
             className="w-9 h-9 rounded-2xl flex items-center justify-center shrink-0"
             style={{ background: selectedVoiceId === null ? primary : '#E7E5E4' }}
           >
-            <Volume2 size={14} color={selectedVoiceId === null ? '#FFFFFF' : '#78716C'} />
+            {previewLoadingFor === tenantDefault && selectedVoiceId === null ? (
+              <Loader2 size={14} color="#FFFFFF" className="animate-spin" />
+            ) : (
+              <Volume2 size={14} color={selectedVoiceId === null ? '#FFFFFF' : '#78716C'} />
+            )}
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-xs font-semibold text-stone-800">Standard für {tenant.name}</p>
@@ -1072,11 +1216,13 @@ function OpenAIVoicePicker({ tenant, selectedVoiceId, onSelect, primary }: any) 
         {/* Alle OpenAI-Stimmen */}
         {OPENAI_VOICES.map((voice: any) => {
           const isSelected = voice.id === selectedVoiceId;
+          const isLoading = previewLoadingFor === voice.id;
           return (
             <button
               key={voice.id}
-              onClick={() => onSelect(voice.id)}
-              className="w-full p-3 rounded-2xl border-2 transition flex items-center gap-3 text-left"
+              onClick={() => handleSelect(voice.id)}
+              disabled={previewLoadingFor !== null && !isLoading}
+              className="w-full p-3 rounded-2xl border-2 transition flex items-center gap-3 text-left disabled:opacity-60"
               style={{
                 borderColor: isSelected ? primary : '#E7E5E4',
                 background: isSelected ? `${primary}10` : '#FAFAF9',
@@ -1089,7 +1235,11 @@ function OpenAIVoicePicker({ tenant, selectedVoiceId, onSelect, primary }: any) 
                   color: isSelected ? '#FFFFFF' : '#78716C',
                 }}
               >
-                {voice.label.slice(0, 2)}
+                {isLoading ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  voice.label.slice(0, 2)
+                )}
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-semibold text-stone-800">{voice.label}</p>
