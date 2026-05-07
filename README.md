@@ -265,6 +265,18 @@ Sprich frei. Beispiel: "Frau Müller, Blutdruck 130 zu 85." — Anni transkribie
 
 > 💡 **Demo-User bleibt im Demo-Modus:** Wenn du gleichzeitig mit einem Demo-User eingeloggt bist (z.B. in einem zweiten Browser-Fenster), nutzt der weiterhin Web Speech API. Pro Session wird im JWT-Token entschieden, welcher Voice-Stack aktiv ist.
 
+#### Hinweise zur Sprachausgabe (Demo-Modus)
+
+Demo-User nutzen die Web Speech API des Browsers — keine Cloud-Calls, kostenlos. Die Stimmen-Verfügbarkeit hängt vom Gerät ab:
+
+- **Desktop (Chrome/Firefox):** 20+ Stimmen, mehrere pro Sprache
+- **iOS Safari:** ~10-15 deutsche Stimmen vorinstalliert. Premium-Stimmen ("Anna Premium", "Markus Premium") können unter **Einstellungen → Bedienungshilfen → VoiceOver → Sprachausgabe → Deutsch** als Download nachgeladen werden
+- **Android Chrome:** ähnlich Desktop
+
+Die Stimme kann im Settings-Modal in der App ausgewählt werden. Beim Antippen einer Stimme wird sie sofort als Hörprobe abgespielt.
+
+> ⚠️ **iOS-Eigenheit:** iOS Safari sperrt Sprachausgabe bis zur ersten User-Interaktion. Deshalb funktioniert die Demo erst nachdem der User einmal auf den Push-to-Talk Button getippt hat. Das ist Apple-Design, kein Bug der App.
+
 ---
 
 ### Phase 6: Eigene Domain (optional)

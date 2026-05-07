@@ -8,6 +8,8 @@ import {
   Building2, Wrench, Shield, LogOut, Sparkles, Users,
 } from 'lucide-react';
 import type { PublicTenantConfig } from '@/lib/tenants';
+import { useSpeechSynthesis } from '@/lib/use-speech-synthesis';
+import VoicePicker from './VoicePicker';
 
 type VoiceState = 'idle' | 'connecting' | 'recording' | 'processing' | 'responding' | 'error';
 
@@ -121,7 +123,6 @@ export default function VoiceApp({ tenant, user }: Props) {
   const idCounter = useRef(0);
   const dialogEndRef = useRef<HTMLDivElement>(null);
   const audioLevelTimer = useRef<number | null>(null);
-  const speechRef = useRef<SpeechSynthesisUtterance | null>(null);
 
   // Production-Mode (OpenAI Realtime) Refs
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -174,24 +175,18 @@ export default function VoiceApp({ tenant, user }: Props) {
     return () => window.removeEventListener('keydown', onKey);
   }, [voiceState, demoStep]);
 
-  // ─────────── Web Speech API für Demo-User ───────────
-  const speak = (text: string) => {
-    if (!audioEnabled || typeof window === 'undefined' || !window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance(text);
-    utter.lang = tenant.default_language === 'de' ? 'de-DE' : 'en-US';
-    utter.rate = 1.05;
-    utter.pitch = 1.0;
-    utter.volume = 0.9;
-    speechRef.current = utter;
-    window.speechSynthesis.speak(utter);
-  };
+  // ─────────── Web Speech API via Hook (mit iOS-Fixes) ───────────
+  const preferredLang = tenant.default_language === 'de' ? 'de-DE' : 'en-US';
+  const speech = useSpeechSynthesis({ preferredLang });
 
-  const stopSpeech = () => {
-    if (typeof window !== 'undefined' && window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-    }
-  };
+  const speak = useCallback((text: string) => {
+    if (!audioEnabled) return;
+    speech.speak(text, { rate: 1.05, pitch: 1.0, volume: 1.0 });
+  }, [audioEnabled, speech]);
+
+  const stopSpeech = useCallback(() => {
+    speech.cancel();
+  }, [speech]);
 
   // ─────────── Demo-Flow für Demo-User ───────────
   const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -425,6 +420,12 @@ export default function VoiceApp({ tenant, user }: Props) {
 
   // ─────────── Unified Tap-Handler ───────────
   const handleTap = () => {
+    // iOS Speech-Engine entsperren - muss synchron im Touch-Event passieren.
+    // Idempotent: nach dem ersten Mal No-Op.
+    if (isDemoUser) {
+      speech.primeForUserInteraction();
+    }
+
     if (isDemoUser) {
       // Demo-User: simulierter Flow mit Web Speech
       if (voiceState === 'idle' || voiceState === 'error') runDemoFlow();
@@ -495,7 +496,12 @@ export default function VoiceApp({ tenant, user }: Props) {
         </div>
         <div className="flex items-center gap-1 shrink-0">
           <button
-            onClick={() => setAudioEnabled(!audioEnabled)}
+            onClick={() => {
+              const next = !audioEnabled;
+              setAudioEnabled(next);
+              // Beim Aktivieren: Engine entsperren (User-Interaction)
+              if (next && isDemoUser) speech.primeForUserInteraction();
+            }}
             className={`w-10 h-10 rounded-2xl flex items-center justify-center transition ${audioEnabled ? 'bg-stone-100 hover:bg-stone-200 text-stone-700' : 'bg-stone-50 text-stone-400'}`}
           >
             {audioEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}
@@ -585,6 +591,7 @@ export default function VoiceApp({ tenant, user }: Props) {
           tenant={tenant}
           user={user}
           primary={primary}
+          speech={speech}
           onLogout={handleLogout}
           onClose={() => setShowSettings(false)}
         />
@@ -736,7 +743,7 @@ function EmptyState({ tenant, primary, secondary, isDemoUser }: any) {
 
 /* ─────────── Settings Modal ─────────── */
 
-function SettingsModal({ tenant, user, primary, onLogout, onClose }: any) {
+function SettingsModal({ tenant, user, primary, onLogout, onClose, speech }: any) {
   return (
     <div className="fixed inset-0 z-50 bg-stone-900/30 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div className="bg-white sm:rounded-3xl rounded-t-3xl max-w-md w-full max-h-[90vh] overflow-y-auto shadow-2xl">
@@ -763,6 +770,35 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose }: any) {
               )}
             </div>
           </section>
+
+          {/* Voice-Picker - nur sichtbar wenn Web Speech genutzt wird (Demo-User) */}
+          {user.isDemoUser && speech?.isSupported && (
+            <section>
+              <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
+                <Volume2 size={12} /> Stimme der Sprachausgabe
+              </h4>
+              <p className="text-[11px] text-stone-500 mb-3">
+                Wähle eine Stimme. Tippe auf eine Option, um sie sofort zu hören.
+              </p>
+              <VoicePicker
+                voices={speech.voices}
+                allVoices={speech.allVoices}
+                selectedVoiceId={speech.selectedVoiceId}
+                onSelect={speech.selectVoice}
+                onPreview={(id: string | null) => {
+                  // Engine entsperren falls noch nicht passiert
+                  speech.primeForUserInteraction();
+                  // selectVoice wirkt asynchron - wir geben dem State-Update einen Tick
+                  setTimeout(() => {
+                    speech.speak('Hallo, ich bin Anni. So klinge ich.', {
+                      rate: 1.0,
+                    });
+                  }, 100);
+                }}
+                primary={primary}
+              />
+            </section>
+          )}
 
           <section>
             <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
