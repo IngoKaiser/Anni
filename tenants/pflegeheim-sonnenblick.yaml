@@ -10,8 +10,6 @@ tenant:
   email_domains:
     - sonnenblick.de
     - sonnenblick-pflege.de
-    - gmail.com
-    - icloud.com
   default_language: de
   auth_mode: magic_link
 

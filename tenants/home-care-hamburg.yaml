@@ -11,6 +11,8 @@ tenant:
   email_domains:
     - homecare-hamburg.de
     - hc-hamburg.de
+    - gmail.com
+    - icloud.com
   default_language: de
   auth_mode: magic_link
 
