@@ -33,13 +33,12 @@ declare module 'next-auth' {
   }
 }
 
-declare module '@auth/core/jwt' {
-  interface JWT {
-    tenantId?: string;
-    role?: string;
-    isDemoUser?: boolean;
-  }
-}
+// Hinweis: Wir augmentieren absichtlich NICHT 'next-auth/jwt' als Modul.
+// In Auth.js v5-beta ist das Pfad-Mapping zwischen next-auth und @auth/core
+// nicht stabil (das nested @auth/core in next-auth's eigenem node_modules
+// macht TypeScript Resolution unzuverlässig). Wir nutzen stattdessen
+// einfache Type-Casts in den Callbacks unten - das JWT akzeptiert
+// zur Laufzeit beliebige Felder, die Augmentation ist nur Type-Hint.
 
 // Demo-User - vorab konfiguriert für Demo-Quick-Login
 export const DEMO_USERS = [
@@ -130,18 +129,23 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     },
 
     async jwt({ token, user }) {
+      // token ist JWT, wird aber zur Laufzeit als Plain-Object behandelt.
+      // Type-Cast auf 'any' an Schreibstellen, weil wir das Modul-Augmentation
+      // bewusst weggelassen haben (siehe Kommentar oben).
+      const t = token as any;
       if (user) {
-        if (user.tenantId) {
-          token.tenantId = user.tenantId;
-          token.role = user.role;
-          token.isDemoUser = user.isDemoUser ?? false;
+        const u = user as any;
+        if (u.tenantId) {
+          t.tenantId = u.tenantId;
+          t.role = u.role;
+          t.isDemoUser = u.isDemoUser ?? false;
         } else if (user.email) {
           // Magic-Link User: Tenant via Email-Domain auflösen
           const tenant = resolveTenantByEmail(user.email);
           if (tenant) {
-            token.tenantId = tenant.tenant.id;
-            token.role = tenant.roles[0]?.id || 'user';
-            token.isDemoUser = false;
+            t.tenantId = tenant.tenant.id;
+            t.role = tenant.roles[0]?.id || 'user';
+            t.isDemoUser = false;
           }
         }
       }
@@ -149,9 +153,10 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     },
 
     async session({ session, token }) {
-      if (token.tenantId) session.user.tenantId = token.tenantId as string;
-      if (token.role) session.user.role = token.role as string;
-      if (typeof token.isDemoUser === 'boolean') session.user.isDemoUser = token.isDemoUser;
+      const t = token as any;
+      if (t.tenantId) session.user.tenantId = t.tenantId as string;
+      if (t.role) session.user.role = t.role as string;
+      if (typeof t.isDemoUser === 'boolean') session.user.isDemoUser = t.isDemoUser;
       return session;
     },
   },

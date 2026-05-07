@@ -159,17 +159,17 @@ Im Import-Dialog gibt es einen Bereich **Environment Variables**. Trage erstmal 
 
 ### Phase 3: Postgres-Datenbank
 
-Vercel Postgres ist eine verwaltete Postgres-DB (powered by Neon). Sie wird mit zwei Klicks im Vercel-Dashboard erstellt und automatisch mit dem Projekt verbunden.
+Vercel Postgres wurde Ende 2024 zu Neon migriert. Die App nutzt den **Neon Serverless Driver** (`@neondatabase/serverless`), der HTTP-basiert arbeitet und perfekt für serverless Environments funktioniert.
 
-#### 3.1 Postgres-DB anlegen
+#### 3.1 Neon-DB anlegen
 
 1. Im Vercel-Projekt-Dashboard: **Storage** Tab oben.
-2. **Create Database** klicken, **Postgres** wählen.
+2. **Create Database** klicken, **Neon (Postgres)** aus dem Marketplace wählen.
 3. Name: `anni-db` (oder beliebig). Region: **Frankfurt** wählen für EU-Datenresidenz.
 4. **Create** klicken.
 5. Vercel fragt: "Connect to project?" — `anni` wählen, **Connect**.
 
-Vercel setzt jetzt automatisch alle `POSTGRES_*` Environment-Variablen. Du musst nichts manuell eintragen.
+Vercel setzt jetzt automatisch die `DATABASE_URL` (und legacy `POSTGRES_URL`) Environment-Variablen. Du musst nichts manuell eintragen.
 
 #### 3.2 Re-Deployment
 
@@ -567,7 +567,7 @@ Sichtbar über `?demo=1` URL-Parameter oder `DEMO_LOGIN_VISIBLE=true`:
 - **Next.js 15** mit App Router
 - **React 18** + Tailwind CSS
 - **Auth.js v5** (NextAuth) mit Resend-Provider und Credentials für Demo
-- **Vercel Postgres** für Audit-Log
+- **Neon Postgres** (Serverless Driver) für Audit-Log
 - **OpenAI Realtime API** für Voice (Production)
 - **Web Speech API** für Voice (Demo)
 - **TypeScript** strict mode

@@ -1,10 +1,17 @@
 /**
  * Audit Logging
  *
- * Schreibt User-Aktionen in Postgres.
- * Wenn keine DB konfiguriert ist (lokal ohne Vercel Postgres),
+ * Schreibt User-Aktionen in Postgres via Neon Serverless Driver.
+ * Wenn keine DB konfiguriert ist (lokal ohne Vercel Postgres/Neon),
  * wird in die Console geloggt - die App bleibt funktionsfähig.
+ *
+ * Hinweis zur Connection-URL: Vercel + Neon-Integration setzt die Variablen
+ * unter mehreren Namen (DATABASE_URL, POSTGRES_URL, etc.). Wir prüfen
+ * beide, damit es egal ist, welcher Storage-Anbieter im Vercel-Projekt
+ * verbunden ist.
  */
+
+import { neon, type NeonQueryFunction } from '@neondatabase/serverless';
 
 export type AuditEvent =
   | 'session.started'
@@ -27,21 +34,35 @@ export interface AuditEntry {
 }
 
 /**
- * Erkennt, ob Postgres verfügbar ist.
+ * Ermittelt die Datenbank-URL aus den verschiedenen Env-Varianten,
+ * die Vercel/Neon setzen.
  */
-function hasPostgres(): boolean {
-  return !!process.env.POSTGRES_URL;
+function getDatabaseUrl(): string | null {
+  return (
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL ||
+    process.env.POSTGRES_PRISMA_URL ||
+    null
+  );
 }
 
-/**
- * Init-Funktion - legt Tabelle an, idempotent.
- * Wird beim ersten Schreibversuch automatisch aufgerufen.
- */
-let tableInitialized = false;
-async function ensureTable(): Promise<void> {
-  if (tableInitialized || !hasPostgres()) return;
+let cachedSql: NeonQueryFunction<false, false> | null = null;
 
-  const { sql } = await import('@vercel/postgres');
+function getSql(): NeonQueryFunction<false, false> | null {
+  if (cachedSql) return cachedSql;
+  const url = getDatabaseUrl();
+  if (!url) return null;
+  cachedSql = neon(url);
+  return cachedSql;
+}
+
+let tableInitialized = false;
+
+async function ensureTable(): Promise<void> {
+  if (tableInitialized) return;
+  const sql = getSql();
+  if (!sql) return;
+
   await sql`
     CREATE TABLE IF NOT EXISTS audit_log (
       id SERIAL PRIMARY KEY,
@@ -55,11 +76,11 @@ async function ensureTable(): Promise<void> {
       metadata JSONB,
       created_at TIMESTAMPTZ DEFAULT NOW(),
       ip_address VARCHAR(64)
-    );
+    )
   `;
-  await sql`CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id);`;
-  await sql`CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_log(tenant_id);`;
-  await sql`CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_log(tenant_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at)`;
   tableInitialized = true;
 }
 
@@ -69,13 +90,13 @@ async function ensureTable(): Promise<void> {
  */
 export async function logAuditEvent(entry: AuditEntry, ip?: string): Promise<void> {
   try {
-    if (!hasPostgres()) {
+    const sql = getSql();
+    if (!sql) {
       console.log('[audit]', JSON.stringify({ ...entry, ip, timestamp: new Date().toISOString() }));
       return;
     }
 
     await ensureTable();
-    const { sql } = await import('@vercel/postgres');
     await sql`
       INSERT INTO audit_log (
         event, user_id, user_email, tenant_id, is_demo_user,
@@ -91,7 +112,7 @@ export async function logAuditEvent(entry: AuditEntry, ip?: string): Promise<voi
         ${entry.toolLabel ?? null},
         ${entry.metadata ? JSON.stringify(entry.metadata) : null},
         ${ip ?? null}
-      );
+      )
     `;
   } catch (err) {
     console.error('[audit] Failed:', err);
@@ -100,20 +121,21 @@ export async function logAuditEvent(entry: AuditEntry, ip?: string): Promise<voi
 
 /**
  * Liest Audit-Log eines Tenants (für spätere Admin-Views).
+ * Neon's neon() liefert Ergebnisse direkt als Array - kein .rows mehr.
  */
 export async function getAuditLog(tenantId: string, limit: number = 100): Promise<any[]> {
-  if (!hasPostgres()) return [];
+  const sql = getSql();
+  if (!sql) return [];
 
   try {
     await ensureTable();
-    const { sql } = await import('@vercel/postgres');
-    const result = await sql`
+    const rows = await sql`
       SELECT * FROM audit_log
       WHERE tenant_id = ${tenantId}
       ORDER BY created_at DESC
-      LIMIT ${limit};
+      LIMIT ${limit}
     `;
-    return result.rows;
+    return rows as any[];
   } catch (err) {
     console.error('[audit] Query failed:', err);
     return [];
