@@ -4,25 +4,36 @@ import { auth } from '@/lib/auth';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-// Whitelist - dieselbe Liste wie /api/session, damit Probe und Realtime
-// dieselben Stimmen anbieten (sonst würde der User in der Probe Stimmen
-// hören, die in einer Realtime-Session zu 400-Fehlern führen).
 const ALLOWED_VOICES = new Set([
   'alloy', 'ash', 'ballad', 'coral', 'echo',
   'sage', 'shimmer', 'verse', 'marin', 'cedar',
 ]);
 
-// Maximale Text-Länge für Proben - verhindert Missbrauch als TTS-Service
 const MAX_PREVIEW_LENGTH = 200;
+
+/**
+ * Sprach-spezifische TTS-Anweisungen.
+ * Müssen mit den App-Sprachen in lib/i18n.tsx übereinstimmen.
+ * Bei unbekannten Codes fällt es auf Englisch zurück.
+ */
+const TTS_INSTRUCTIONS: Record<string, string> = {
+  de: 'Sprich auf Deutsch mit natürlicher, klarer Aussprache. Freundlicher, professioneller Ton einer Pflege-Assistentin.',
+  en: 'Speak in clear English with a natural, friendly tone. Warm and professional, like a care assistant.',
+  it: 'Parla in italiano con pronuncia chiara e naturale. Tono amichevole e professionale di una assistente di cura.',
+  fr: 'Parle en français avec une prononciation claire et naturelle. Ton amical et professionnel d\'une assistante de soins.',
+  es: 'Habla en español con pronunciación clara y natural. Tono amable y profesional de una asistente de cuidados.',
+};
 
 /**
  * Liefert eine kurze Audio-Probe einer OpenAI-Stimme.
  *
- * Genutzt im Settings-Modal um Stimmen vorzuhören.
- * Kein Streaming - kompakter MP3-Download, ~30-40 KB pro Probe.
+ * Body:
+ *   { voice: string, text: string, locale?: string }
  *
- * Kosten: TTS API kostet $15 pro 1M Zeichen.
- * Eine typische Probe (40 Zeichen) kostet damit 0,0006 USD = praktisch nichts.
+ * locale steuert die TTS-Aussprache-Anweisung. Standard: 'en'.
+ * Der text kommt vom Client und enthält bereits den lokalisierten Beispielsatz.
+ *
+ * Kosten: TTS API ~$0.0006 pro Probe.
  */
 export async function POST(req: NextRequest) {
   const session = await auth();
@@ -44,7 +55,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
   }
 
-  const { voice, text } = body;
+  const { voice, text, locale } = body;
 
   if (typeof voice !== 'string' || !ALLOWED_VOICES.has(voice)) {
     return NextResponse.json({ error: 'Ungültige Stimme' }, { status: 400 });
@@ -54,8 +65,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Kein Text angegeben' }, { status: 400 });
   }
 
-  // Längen-Limit - Probe-Endpoint, kein TTS-Service
   const safeText = text.slice(0, MAX_PREVIEW_LENGTH);
+  const instructions = TTS_INSTRUCTIONS[locale as string] || TTS_INSTRUCTIONS.en;
 
   try {
     const ttsRes = await fetch('https://api.openai.com/v1/audio/speech', {
@@ -68,10 +79,7 @@ export async function POST(req: NextRequest) {
         model: 'gpt-4o-mini-tts',
         voice,
         input: safeText,
-        // Deutsche Aussprache erzwingen - sonst spricht das Modell die
-        // OpenAI-Voices oft mit englischem Akzent. instructions ist der
-        // dedizierte gpt-4o-mini-tts Parameter für Stil/Akzent/Tempo.
-        instructions: 'Sprich auf Deutsch mit natürlicher, klarer Aussprache. Freundlicher, professioneller Ton einer Pflege-Assistentin.',
+        instructions,
         response_format: 'mp3',
         speed: 1.0,
       }),
@@ -86,9 +94,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // MP3-Bytes direkt durchreichen
     const audioBuffer = await ttsRes.arrayBuffer();
-
     return new NextResponse(audioBuffer, {
       status: 200,
       headers: {

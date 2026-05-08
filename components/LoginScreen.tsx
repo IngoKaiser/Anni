@@ -3,7 +3,8 @@
 import React, { useState, useEffect } from 'react';
 import { signIn } from 'next-auth/react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Mail, ArrowRight, Heart, Zap, AlertCircle, RefreshCw } from 'lucide-react';
+import { Mail, ArrowRight, Heart, Zap, AlertCircle, RefreshCw, Globe, Check } from 'lucide-react';
+import { useI18n, SUPPORTED_LOCALES, type Locale } from '@/lib/i18n';
 
 interface DemoUser {
   id: string;
@@ -25,56 +26,19 @@ interface DemoTenant {
   };
 }
 
-/**
- * Übersetzt Auth.js-Error-Codes in nutzerfreundliche deutsche Texte.
- * Auth.js wirft hauptsächlich diese Codes:
- *   - 'Configuration': Server-Misskonfiguration (AUTH_SECRET, RESEND_API_KEY etc.)
- *   - 'Verification': Token ungültig oder abgelaufen
- *   - 'EmailSignInError': Resend konnte Email nicht versenden
- *   - 'AccessDenied': Domain nicht freigeschaltet (signIn-Callback returned false)
- *   - 'CallbackRouteError': Magic-Link-Klick gescheitert
- */
-function translateAuthError(code: string): string {
-  if (!code) return 'Unbekannter Fehler beim Anmelden.';
-
-  const c = code.toLowerCase();
-
-  if (c.includes('emailsignin') || c.includes('email')) {
-    return 'Die Email konnte nicht versendet werden. Häufige Ursachen: ' +
-           'Resend-API-Key ist ungültig, oder die Absender-Domain ist nicht ' +
-           'in Resend verifiziert. Bitte erneut versuchen oder den Administrator kontaktieren.';
-  }
-  if (c.includes('verification')) {
-    return 'Der Anmelde-Link ist abgelaufen oder ungültig. ' +
-           'Bitte einen neuen Link anfordern.';
-  }
-  if (c.includes('accessdenied')) {
-    return 'Diese Email-Domain ist nicht für Anni freigeschaltet. ' +
-           'Bitte den Administrator kontaktieren.';
-  }
-  if (c.includes('configuration')) {
-    return 'Der Server ist nicht korrekt konfiguriert. ' +
-           'Bitte den Administrator kontaktieren.';
-  }
-  if (c.includes('callback')) {
-    return 'Beim Verarbeiten des Anmelde-Links ist ein Fehler aufgetreten. ' +
-           'Bitte erneut versuchen.';
-  }
-  // Fallback: technischen Code zumindest mit anzeigen
-  return `Anmeldung fehlgeschlagen (${code}). Bitte erneut versuchen.`;
-}
-
 export default function LoginScreen() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { t, locale, setLocale } = useI18n();
   const isDemoParam = searchParams.get('demo') === '1';
-  // Auth.js redirectet bei Fehlern hierher mit ?error=...
   const urlError = searchParams.get('error');
 
   const [email, setEmail] = useState('');
   const [error, setError] = useState('');
   const [showDemoOptions, setShowDemoOptions] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [showLanguagePicker, setShowLanguagePicker] = useState(false);
+
   const [info, setInfo] = useState<{
     showDemoLogin: boolean;
     tenants: DemoTenant[];
@@ -82,6 +46,21 @@ export default function LoginScreen() {
     hasMagicLink: boolean;
     hasOpenAI: boolean;
   } | null>(null);
+
+  /**
+   * Auth.js-Error-Codes in nutzerfreundliche Texte übersetzen.
+   * Verwendet i18n - sprache-abhängig.
+   */
+  function translateAuthError(code: string): string {
+    if (!code) return t('login.error.unknown');
+    const c = code.toLowerCase();
+    if (c.includes('emailsignin') || c.includes('email')) return t('login.error.email');
+    if (c.includes('verification')) return t('login.error.verification');
+    if (c.includes('accessdenied')) return t('login.error.accessDenied');
+    if (c.includes('configuration')) return t('login.error.configuration');
+    if (c.includes('callback')) return t('login.error.callback');
+    return `${t('login.error.unknown')} (${code})`;
+  }
 
   useEffect(() => {
     const url = isDemoParam ? '/api/demo-info?demo=1' : '/api/demo-info';
@@ -91,20 +70,18 @@ export default function LoginScreen() {
       .catch(() => {});
   }, [isDemoParam]);
 
-  // Wenn Auth.js mit ?error=... redirectet, übernehmen wir den Fehler
-  // sofort in den State - so sieht der User die Meldung direkt.
   useEffect(() => {
     if (urlError) {
       setError(translateAuthError(urlError));
-      // URL säubern - sonst bleibt der Error-Param beim Reload erhalten
       window.history.replaceState({}, '', window.location.pathname);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlError]);
 
   const handleMagicLink = async () => {
     setError('');
     if (!email.includes('@')) {
-      setError('Bitte gültige Email-Adresse eingeben');
+      setError(t('login.error.invalidEmail'));
       return;
     }
 
@@ -112,37 +89,31 @@ export default function LoginScreen() {
     const tenant = info?.tenants.find(t => t.email_domains.includes(domain || ''));
     if (!tenant) {
       const hint = info?.showDemoLogin
-        ? 'Diese Email-Domain ist noch nicht freigeschaltet. Probiere eine Demo-Anmeldung unten.'
-        : 'Diese Email-Domain ist noch nicht freigeschaltet. Bitte wende dich an den Support.';
+        ? t('login.error.unknownDomain.withDemo')
+        : t('login.error.unknownDomain.noDemo');
       setError(hint);
       return;
     }
 
     if (!info?.hasMagicLink) {
-      setError('Email-Login ist auf diesem System nicht konfiguriert.');
+      setError(t('login.error.notConfigured'));
       return;
     }
 
     setSubmitting(true);
     try {
-      // redirect: false ist wichtig - sonst landet man auf der generischen
-      // Auth.js Error-Page wenn Resend fehlschlägt (z.B. unverifizierte Domain).
       const result = await signIn('resend', {
         email,
         redirect: false,
         callbackUrl: '/',
       });
 
-      // Auth.js v5: bei Erfolg gibt es ein 'ok: true' und 'url' zur Verify-Seite
       if (result?.error) {
-        // Bekannte Auth.js-Error-Codes übersetzen
-        const friendly = translateAuthError(result.error);
-        setError(friendly);
+        setError(translateAuthError(result.error));
         setSubmitting(false);
         return;
       }
 
-      // Erfolg: zur Verify-Seite weiterleiten (kommt aus result.url)
       if (result?.url) {
         router.push(result.url);
       } else {
@@ -155,64 +126,106 @@ export default function LoginScreen() {
   };
 
   const handleDemoLogin = async (demoUserId: string) => {
-    setSubmitting(true);
+    setError('');
     try {
       const result = await signIn('demo-quicklogin', {
         demoUserId,
         redirect: false,
+        callbackUrl: '/',
       });
       if (result?.error) {
-        setError('Demo-Login fehlgeschlagen');
-        setSubmitting(false);
+        setError(t('login.error.demoFailed') in (window as any) ? '' : 'Demo login failed');
         return;
       }
       router.push('/');
-      router.refresh();
     } catch (err: any) {
-      setError(err?.message || 'Demo-Login fehlgeschlagen');
-      setSubmitting(false);
+      setError(err?.message || 'Demo login failed');
     }
   };
 
+  const currentLocale = SUPPORTED_LOCALES.find(l => l.code === locale);
+
   return (
     <div
-      className="min-h-screen flex items-center justify-center px-4 py-8"
+      className="min-h-screen flex items-center justify-center px-4 py-8 relative"
       style={{ background: 'linear-gradient(135deg, #FFE4E6 0%, #FED7AA 50%, #FEF3C7 100%)' }}
     >
+      {/* Sprach-Picker oben rechts */}
+      <div className="absolute top-4 right-4">
+        <button
+          onClick={() => setShowLanguagePicker(!showLanguagePicker)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/70 backdrop-blur hover:bg-white/90 transition text-sm"
+        >
+          <span className="text-base">{currentLocale?.flag}</span>
+          <span className="text-stone-700">{currentLocale?.nativeLabel}</span>
+        </button>
+        {showLanguagePicker && (
+          <div className="absolute right-0 top-full mt-2 bg-white rounded-2xl shadow-lg border border-stone-200 overflow-hidden min-w-[180px]">
+            {SUPPORTED_LOCALES.map(l => (
+              <button
+                key={l.code}
+                onClick={() => {
+                  setLocale(l.code);
+                  setShowLanguagePicker(false);
+                }}
+                className="w-full px-3 py-2.5 flex items-center gap-2 hover:bg-stone-50 text-sm text-left"
+              >
+                <span className="text-base">{l.flag}</span>
+                <span className="flex-1">{l.nativeLabel}</span>
+                {l.code === locale && <Check size={14} className="text-rose-500" />}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="w-full max-w-md">
+        {/* Logo / Tagline */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-20 h-20 rounded-3xl bg-white shadow-lg mb-4">
-            <Heart className="text-rose-400" strokeWidth={2.5} size={36} fill="currentColor" />
+            <Heart className="text-rose-500" size={36} strokeWidth={2.5} fill="currentColor" />
           </div>
-          <h1 className="text-2xl font-bold text-stone-800 mb-2">Anni</h1>
-          <p className="text-sm text-stone-600">Deine persönliche Assistentin</p>
+          <h1 className="text-3xl font-bold text-stone-800 mb-1">Anni</h1>
+          <p className="text-sm text-stone-600">{t('login.tagline')}</p>
         </div>
 
-        <div className="bg-white rounded-3xl shadow-xl p-6 mb-4">
-          <h2 className="text-lg font-semibold text-stone-800 mb-1">Anmelden</h2>
-          <p className="text-sm text-stone-500 mb-5">
+        {/* Login-Karte */}
+        <div className="bg-white/80 backdrop-blur rounded-3xl shadow-xl p-6">
+          <h2 className="text-lg font-semibold text-stone-800 mb-1">{t('login.title')}</h2>
+          <p className="text-xs text-stone-500 mb-4">
             {info?.hasMagicLink
-              ? 'Wir schicken dir einen Anmelde-Link per Email.'
-              : 'Email-Login ist nicht konfiguriert.'}
+              ? t('login.subtitle.magicLink')
+              : t('login.subtitle.noMagicLink')}
           </p>
 
-          <label className="block text-xs font-semibold text-stone-700 mb-2 uppercase tracking-wider">
-            Deine Email
-          </label>
-          <div className="relative">
-            <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-stone-400" size={18} />
-            <input
-              type="email"
-              value={email}
-              onChange={e => {
-                setEmail(e.target.value);
-                setError('');
-              }}
-              onKeyDown={e => e.key === 'Enter' && handleMagicLink()}
-              placeholder="anne@deine-einrichtung.de"
-              disabled={!info?.hasMagicLink || submitting}
-              className="w-full pl-12 pr-4 py-3.5 rounded-2xl border-2 border-stone-200 focus:border-rose-400 focus:outline-none text-stone-800 placeholder-stone-400 transition disabled:bg-stone-50 disabled:text-stone-400"
-            />
+          {/* Email-Form */}
+          <div className="space-y-3">
+            <div>
+              <label className="text-xs font-medium text-stone-600 mb-1 block">
+                {t('login.email.label')}
+              </label>
+              <input
+                type="email"
+                value={email}
+                onChange={e => {
+                  setEmail(e.target.value);
+                  if (error) setError('');
+                }}
+                placeholder={t('login.email.placeholder')}
+                className="w-full px-4 py-3 rounded-2xl border border-stone-200 bg-white focus:outline-none focus:border-rose-300 focus:ring-2 focus:ring-rose-100 transition"
+                disabled={submitting || !info?.hasMagicLink}
+              />
+            </div>
+
+            <button
+              onClick={handleMagicLink}
+              disabled={submitting || !email || !info?.hasMagicLink}
+              className="w-full py-3 rounded-2xl bg-gradient-to-r from-rose-500 to-orange-400 hover:from-rose-600 hover:to-orange-500 text-white font-semibold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition shadow-md"
+            >
+              <Mail size={16} />
+              {submitting ? t('login.button.sending') : t('login.button.send')}
+              {!submitting && <ArrowRight size={16} />}
+            </button>
           </div>
 
           {error && (
@@ -221,72 +234,64 @@ export default function LoginScreen() {
                 <AlertCircle size={16} className="text-rose-500 flex-shrink-0 mt-0.5" />
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-semibold text-rose-800 mb-0.5">
-                    Anmeldung fehlgeschlagen
+                    {t('login.error.title')}
                   </p>
-                  <p className="text-xs text-rose-700 leading-relaxed">
-                    {error}
-                  </p>
+                  <p className="text-xs text-rose-700 leading-relaxed">{error}</p>
                   <button
                     onClick={() => setError('')}
                     className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-rose-700 hover:text-rose-800"
                   >
                     <RefreshCw size={11} />
-                    Erneut versuchen
+                    {t('login.error.retry')}
                   </button>
                 </div>
               </div>
             </div>
           )}
 
-          <button
-            onClick={handleMagicLink}
-            disabled={!email || !info?.hasMagicLink || submitting}
-            className="mt-4 w-full py-3.5 rounded-2xl bg-rose-500 hover:bg-rose-400 disabled:bg-stone-200 disabled:text-stone-400 text-white font-semibold transition flex items-center justify-center gap-2 shadow-md"
-          >
-            {submitting ? 'Sende…' : 'Anmelde-Link erhalten'}
-            {!submitting && <ArrowRight size={16} />}
-          </button>
-
+          {/* Demo-Sektion */}
           {info?.showDemoLogin && info.demoUsers.length > 0 && (
             <>
-              <div className="my-5 flex items-center gap-3">
+              <div className="flex items-center gap-3 my-5">
                 <div className="flex-1 h-px bg-stone-200" />
-                <span className="text-xs text-stone-400 uppercase tracking-wider">oder</span>
+                <span className="text-xs text-stone-400">{t('login.divider')}</span>
                 <div className="flex-1 h-px bg-stone-200" />
               </div>
 
               <button
                 onClick={() => setShowDemoOptions(!showDemoOptions)}
-                className="w-full py-3 rounded-2xl border-2 border-stone-200 hover:border-stone-300 hover:bg-stone-50 text-stone-700 font-medium transition flex items-center justify-center gap-2"
+                className="w-full py-3 rounded-2xl border-2 border-dashed border-stone-300 hover:border-rose-400 hover:bg-rose-50/50 text-stone-600 font-medium flex items-center justify-center gap-2 transition"
               >
-                <Zap size={16} className="text-rose-500" />
-                Demo-Schnellzugang
+                <Zap size={16} />
+                {t('login.demo.button')}
               </button>
 
               {showDemoOptions && (
                 <div className="mt-3 space-y-2">
-                  {info.demoUsers.map(user => {
-                    const t = info.tenants.find(tn => tn.id === user.tenantId)!;
+                  {info.demoUsers.map(u => {
+                    const tenant = info.tenants.find(t => t.id === u.tenantId);
+                    if (!tenant) return null;
                     return (
                       <button
-                        key={user.email}
-                        onClick={() => handleDemoLogin(user.id)}
-                        disabled={submitting}
-                        className="w-full p-3 rounded-2xl bg-stone-50 hover:bg-stone-100 disabled:opacity-50 text-left transition flex items-center gap-3 border border-stone-100"
+                        key={u.id}
+                        onClick={() => handleDemoLogin(u.id)}
+                        className="w-full p-3 rounded-2xl border border-stone-200 bg-white hover:bg-stone-50 transition text-left flex items-center gap-3"
                       >
                         <div
-                          className="w-10 h-10 rounded-2xl flex items-center justify-center text-xl shrink-0"
-                          style={{ background: t.branding.secondary_color }}
+                          className="w-10 h-10 rounded-2xl flex items-center justify-center text-lg shrink-0"
+                          style={{ background: tenant.branding.primary_color + '20' }}
                         >
-                          {t.branding.logo_emoji}
+                          {tenant.branding.logo_emoji}
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-semibold text-stone-800 truncate">{user.name}</p>
-                          <p className="text-xs text-stone-500 truncate">
-                            {user.role} · {t.name}
+                          <p className="text-sm font-semibold text-stone-800 truncate">
+                            {u.name}
+                          </p>
+                          <p className="text-[11px] text-stone-500 truncate">
+                            {u.role} · {tenant.name}
                           </p>
                         </div>
-                        <ArrowRight size={14} className="text-stone-400 shrink-0" />
+                        <ArrowRight size={14} className="text-stone-400" />
                       </button>
                     );
                   })}
@@ -296,20 +301,19 @@ export default function LoginScreen() {
           )}
         </div>
 
-        {info?.tenants && info.tenants.length > 0 && (
-          <div className="bg-white/60 backdrop-blur rounded-2xl p-4 text-center">
-            <p className="text-xs text-stone-600 mb-2 font-medium">
-              Diese Einrichtungen sind freigeschaltet:
-            </p>
-            <div className="flex justify-center gap-1.5 flex-wrap">
+        {/* Tenant-Liste */}
+        {info && info.tenants.length > 0 && (
+          <div className="mt-5 text-center">
+            <p className="text-xs text-stone-500 mb-2">{t('login.tenants.title')}</p>
+            <div className="flex flex-wrap items-center justify-center gap-1.5">
               {info.tenants.map(t => (
-                <div
+                <span
                   key={t.id}
-                  className="inline-flex items-center gap-1 bg-white rounded-full px-2.5 py-1 text-xs text-stone-600 shadow-sm"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white/60 backdrop-blur text-xs text-stone-600"
                 >
                   <span>{t.branding.logo_emoji}</span>
-                  <span>@{t.email_domains[0]}</span>
-                </div>
+                  {t.name}
+                </span>
               ))}
             </div>
           </div>

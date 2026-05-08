@@ -1,16 +1,19 @@
 /**
  * Voice Backend Adapter
  *
- * Variante C: Pro User wird entschieden welcher Voice-Stack genutzt wird.
- * - Demo-User -> Web Speech API im Browser (Frontend handhabt)
- * - Echte User mit OPENAI_API_KEY gesetzt -> OpenAI Realtime API
- * - Echte User ohne OPENAI_API_KEY -> Fallback auf Web Speech API
+ * Pro Session-Request wird hier entschieden:
+ * - Demo-User → Web Speech API im Browser (Frontend handhabt)
+ * - Normaler Modus → OpenAI Realtime mit Tenant-System-Prompt + Tools
+ * - Translator-Modus → OpenAI Realtime mit Dolmetscher-Prompt, ohne Tenant-Tools
  *
- * Designed als Adapter-Pattern - spätere Backends (Anthropic, Gemini Live)
- * können das gleiche Interface implementieren.
+ * Sprache (App-Locale) wird mitgegeben damit Anni in dieser Sprache antwortet,
+ * unabhängig vom Tenant-Default. Der User wählt seine UI-Sprache, Anni passt
+ * sich an.
  */
 
 import type { TenantConfig, TenantTool } from './tenants';
+
+export type VoiceLocale = 'de' | 'en' | 'it' | 'fr' | 'es';
 
 export interface VoiceSessionDescriptor {
   mode: 'webrtc' | 'demo';
@@ -20,9 +23,34 @@ export interface VoiceSessionDescriptor {
   tools: any[];
   voiceId?: string;
   language?: string;
+  /** Im Translator-Mode gesetzt - Frontend kann diesen Text als Begrüßung anzeigen. */
+  translatorGreeting?: string;
+  /** Marker für Frontend: welche UI rendern (Translator-Vollbild vs Normal). */
+  isTranslator?: boolean;
 }
 
-function buildSystemPrompt(tenant: TenantConfig, userRole: string): string {
+const LOCALE_NAMES: Record<VoiceLocale, string> = {
+  de: 'Deutsch',
+  en: 'English',
+  it: 'italiano',
+  fr: 'français',
+  es: 'español',
+};
+
+/**
+ * Lokalisierte Aussprache-Anweisungen für Realtime-Sessions.
+ * Werden zusätzlich zum System-Prompt mitgegeben damit die Stimme
+ * die richtige Sprache hat (verhindert englischen Akzent bei DE-Voice).
+ */
+const LANGUAGE_INSTRUCTION: Record<VoiceLocale, string> = {
+  de: 'Sprich auf Deutsch mit natürlicher Aussprache.',
+  en: 'Speak in natural English.',
+  it: 'Parla in italiano con pronuncia naturale.',
+  fr: 'Parle en français avec une prononciation naturelle.',
+  es: 'Habla en español con pronunciación natural.',
+};
+
+function buildSystemPrompt(tenant: TenantConfig, userRole: string, locale: VoiceLocale): string {
   const availableTools = tenant.tools.filter(
     t => t.enabled_for_roles.includes('all') || t.enabled_for_roles.includes(userRole)
   );
@@ -31,6 +59,12 @@ function buildSystemPrompt(tenant: TenantConfig, userRole: string): string {
     .map(t => `- ${t.label}: ${t.description}`)
     .join('\n');
 
+  const langName = LOCALE_NAMES[locale];
+  const langInstruction = LANGUAGE_INSTRUCTION[locale];
+
+  // Persona kommt aus YAML auf Deutsch - das ist okay, der Prompt ist nicht
+  // sichtbar für den User. Die Antwort selbst ist durch die Sprach-Anweisung
+  // immer in der gewünschten App-Sprache.
   return `${tenant.agent.persona}
 
 Verfügbare Tools für deine Rolle:
@@ -38,7 +72,15 @@ ${toolDescriptions}
 
 Nutze die Tools selbständig, wenn der Nutzer eine Anfrage stellt, die zu einem Tool passt.
 Bestätige Tool-Aufrufe verbal kurz und prägnant.
-Sprich auf ${tenant.tenant.default_language === 'de' ? 'Deutsch' : tenant.tenant.default_language}.`;
+
+ÜBERSETZUNGSMODUS:
+Wenn der Nutzer "Übersetzung starten", "start translation", "avvia traduzione",
+"démarrer traduction", "iniciar traducción" oder ähnlich sagt, rufe das Tool
+start_translation_mode auf. Frage VORHER nach der Zielsprache, falls nicht erwähnt.
+Wenn der Nutzer sagt er kennt die Sprache nicht, übergib "unknown" als targetLanguage -
+das System erkennt sie dann anhand der nächsten Aussage selbst.
+
+WICHTIG: ${langInstruction} Antworte immer auf ${langName}.`;
 }
 
 function buildToolSchema(tools: TenantTool[]): any[] {
@@ -59,49 +101,113 @@ function buildToolSchema(tools: TenantTool[]): any[] {
 }
 
 /**
+ * System-Tools (verfügbar in jeder Realtime-Session unabhängig vom Tenant).
+ */
+const SYSTEM_TOOLS: any[] = [
+  {
+    type: 'function',
+    name: 'start_translation_mode',
+    description:
+      'Startet den Übersetzungsmodus zwischen der App-Sprache und einer anderen Sprache. ' +
+      'Aufrufen wenn der Nutzer eine Übersetzungs-Anfrage stellt. ' +
+      'targetLanguage ist die Zielsprache als Wort (z.B. "Polnisch", "Polish"), oder "unknown".',
+    parameters: {
+      type: 'object',
+      properties: {
+        targetLanguage: {
+          type: 'string',
+          description: 'Die Zielsprache, oder "unknown" wenn aus dem Kontext erkannt werden soll.',
+        },
+      },
+      required: ['targetLanguage'],
+    },
+  },
+  {
+    type: 'function',
+    name: 'stop_translation_mode',
+    description:
+      'Beendet den Übersetzungsmodus und kehrt zum Normalmodus zurück. ' +
+      'Aufrufen wenn jemand "Anni Übersetzung beenden", "Anni stop translation" o.ä. sagt.',
+    parameters: { type: 'object', properties: {} },
+  },
+];
+
+/**
  * Erstellt eine Voice-Session.
  *
  * @param tenant Der Tenant des Users
  * @param userRole Die Rolle des Users innerhalb des Tenants
  * @param isDemoUser Wenn true: Web Speech API, kein OpenAI-Token
- * @param overrides Optionale User-Präferenzen (Voice-ID etc.)
+ * @param overrides Optionale Präferenzen (Voice-ID, Sprache, VAD, Translator-Mode)
  */
 export async function createVoiceSession(
   tenant: TenantConfig,
   userRole: string,
   isDemoUser: boolean,
-  overrides?: { voiceId?: string }
+  overrides?: {
+    voiceId?: string;
+    locale?: VoiceLocale;
+    vadParams?: {
+      threshold: number;
+      silence_duration_ms: number;
+      prefix_padding_ms: number;
+    };
+    translator?: {
+      systemPrompt: string;
+      greeting: string;
+    };
+  }
 ): Promise<VoiceSessionDescriptor> {
-  const systemPrompt = buildSystemPrompt(tenant, userRole);
-  const availableTools = tenant.tools.filter(
-    t => t.enabled_for_roles.includes('all') || t.enabled_for_roles.includes(userRole)
-  );
-  const tools = buildToolSchema(availableTools);
+  const isTranslator = !!overrides?.translator;
+  const locale = overrides?.locale || 'de';
 
-  // Voice-Auswahl: User-Override > Tenant-Default > 'alloy'
-  // (User-Override wird vom Frontend per localStorage gemanagt
-  // und an dieses Endpoint mitgeschickt)
-  const effectiveVoiceId = overrides?.voiceId || tenant.agent.voice_id || 'alloy';
+  const systemPrompt = isTranslator
+    ? overrides!.translator!.systemPrompt
+    : buildSystemPrompt(tenant, userRole, locale);
 
-  // Demo-User nutzen IMMER Web Speech API + Mock-Antworten
+  // Tools je nach Modus:
+  // - Normal: Tenant-Tools + System-Tools (start/stop translation)
+  // - Translator: NUR stop_translation_mode (sonst würde KI Vitalwerte etc. fälschlich rufen)
+  let tools: any[];
+  if (isTranslator) {
+    tools = SYSTEM_TOOLS.filter(t => t.name === 'stop_translation_mode');
+  } else {
+    const availableTools = tenant.tools.filter(
+      t => t.enabled_for_roles.includes('all') || t.enabled_for_roles.includes(userRole)
+    );
+    tools = [...buildToolSchema(availableTools), ...SYSTEM_TOOLS];
+  }
+
+  const effectiveVoiceId = overrides?.voiceId || tenant.agent.voice_id || 'marin';
+
   if (isDemoUser) {
     return {
       mode: 'demo',
       systemPrompt,
       tools,
       voiceId: effectiveVoiceId,
-      language: tenant.tenant.default_language,
+      language: locale,
     };
   }
 
-  // Echter User, aber OpenAI nicht konfiguriert → klar fehlschlagen.
   if (!process.env.OPENAI_API_KEY) {
     throw new Error(
       'Voice-Backend ist nicht konfiguriert. Bitte den Administrator kontaktieren.'
     );
   }
 
-  // Echte User mit konfiguriertem OpenAI: Realtime API
+  const vadParams = overrides?.vadParams ?? {
+    threshold: 0.65,
+    silence_duration_ms: 700,
+    prefix_padding_ms: 300,
+  };
+
+  // Im Translator-Mode brauchen wir mehr Geduld - User und Patient pausieren
+  // länger zwischen Sätzen, weil sie auf die Übersetzung warten.
+  if (isTranslator) {
+    vadParams.silence_duration_ms = Math.max(vadParams.silence_duration_ms, 900);
+  }
+
   const response = await fetch('https://api.openai.com/v1/realtime/sessions', {
     method: 'POST',
     headers: {
@@ -113,11 +219,12 @@ export async function createVoiceSession(
       voice: effectiveVoiceId,
       instructions: systemPrompt,
       input_audio_transcription: { model: 'gpt-4o-mini-transcribe' },
+      input_audio_noise_reduction: { type: 'near_field' },
       turn_detection: {
         type: 'server_vad',
-        threshold: 0.5,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 700,
+        threshold: vadParams.threshold,
+        prefix_padding_ms: vadParams.prefix_padding_ms,
+        silence_duration_ms: vadParams.silence_duration_ms,
         create_response: true,
       },
     }),
@@ -137,6 +244,8 @@ export async function createVoiceSession(
     systemPrompt,
     tools,
     voiceId: effectiveVoiceId,
-    language: tenant.tenant.default_language,
+    language: locale,
+    isTranslator,
+    translatorGreeting: isTranslator ? overrides!.translator!.greeting : undefined,
   };
 }

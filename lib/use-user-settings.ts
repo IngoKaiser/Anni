@@ -6,31 +6,62 @@
  * Speichert:
  * - voiceId: gewählte OpenAI-Stimme (nur für echte User relevant)
  * - listenTimeoutSec: wie lange Anni nach einer Antwort weiter zuhört (3-60s)
+ * - vadSensitivity: wie empfindlich die Spracherkennung ist
  *
  * Defaults sind bewusst konservativ: 10s Listening passen zu typischen
  * Pflege-Dialog-Pausen (Bewohner anschauen, kurz nachdenken, weiter sprechen).
+ * Standard-VAD-Empfindlichkeit ist 'normal' - bei Hintergrundlärm auf 'low'
+ * stellen, damit das Mikrofon nicht jedes Geräusch als Sprache deutet.
  */
 
 import { useEffect, useState, useCallback } from 'react';
 
 const STORAGE_KEY = 'anni-user-settings';
 
-export type VoiceMode = 'realtime' | 'pipeline';
+/**
+ * VAD-Empfindlichkeit als nutzerfreundliche Stufen.
+ * Mapping zu OpenAI-Parametern (threshold + silence_duration_ms):
+ *   high   = 0.5 / 500ms  (alles wird gehört, schnelle Reaktion)
+ *   normal = 0.65 / 700ms (Default - guter Kompromiss)
+ *   low    = 0.8 / 1000ms (nur deutliche Sprache, bei Hintergrundlärm)
+ */
+export type VadSensitivity = 'high' | 'normal' | 'low';
 
 export interface UserSettings {
   voiceId: string | null;          // null = Tenant-Default verwenden
   listenTimeoutSec: number;         // 3-60
-  voiceMode: VoiceMode;             // 'realtime' = OpenAI Realtime, 'pipeline' = STT+LLM+TTS
+  vadSensitivity: VadSensitivity;
 }
 
 const DEFAULT_SETTINGS: UserSettings = {
   voiceId: null,
   listenTimeoutSec: 10,
-  voiceMode: 'realtime',
+  vadSensitivity: 'normal',
 };
 
 export const LISTEN_TIMEOUT_MIN = 3;
 export const LISTEN_TIMEOUT_MAX = 60;
+
+/**
+ * Konvertiert die User-freundliche Stufe in die konkreten OpenAI-Parameter.
+ * Wird sowohl beim Session-Start (Server) als auch evtl. bei Live-Update
+ * der Sensitivity (Client) verwendet.
+ */
+export function vadSensitivityToParams(sens: VadSensitivity): {
+  threshold: number;
+  silence_duration_ms: number;
+  prefix_padding_ms: number;
+} {
+  switch (sens) {
+    case 'high':
+      return { threshold: 0.5, silence_duration_ms: 500, prefix_padding_ms: 300 };
+    case 'low':
+      return { threshold: 0.8, silence_duration_ms: 1000, prefix_padding_ms: 300 };
+    case 'normal':
+    default:
+      return { threshold: 0.65, silence_duration_ms: 700, prefix_padding_ms: 300 };
+  }
+}
 
 function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
@@ -49,7 +80,10 @@ function loadSettings(): UserSettings {
       listenTimeoutSec: typeof parsed.listenTimeoutSec === 'number'
         ? clamp(parsed.listenTimeoutSec, LISTEN_TIMEOUT_MIN, LISTEN_TIMEOUT_MAX)
         : DEFAULT_SETTINGS.listenTimeoutSec,
-      voiceMode: parsed.voiceMode === 'pipeline' ? 'pipeline' : 'realtime',
+      vadSensitivity:
+        parsed.vadSensitivity === 'high' || parsed.vadSensitivity === 'low'
+          ? parsed.vadSensitivity
+          : 'normal',
     };
   } catch {
     return DEFAULT_SETTINGS;
