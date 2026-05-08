@@ -8,9 +8,12 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 // Whitelist: nur diese Voice-IDs werden akzeptiert (gegen Injection)
+// Muss mit OPENAI_VOICES in lib/use-user-settings.ts übereinstimmen.
+// Stand Mai 2026: Realtime API unterstützt KEINE der Stimmen nova/fable/onyx -
+// diese gibt es nur in der TTS-API. Hier daher ohne diese drei.
 const ALLOWED_VOICES = new Set([
-  'alloy', 'ash', 'ballad', 'coral', 'echo', 'fable',
-  'nova', 'onyx', 'sage', 'shimmer', 'verse',
+  'alloy', 'ash', 'ballad', 'coral', 'echo',
+  'sage', 'shimmer', 'verse', 'marin', 'cedar',
 ]);
 
 export async function POST(req: NextRequest) {

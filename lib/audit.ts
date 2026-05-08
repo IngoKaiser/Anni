@@ -1,13 +1,22 @@
 /**
  * Audit Logging
  *
- * Schreibt User-Aktionen in Postgres via Neon Serverless Driver.
- * Wenn keine DB konfiguriert ist (lokal ohne Vercel Postgres/Neon),
- * wird in die Console geloggt - die App bleibt funktionsfähig.
+ * Schreibt User-Aktionen (Voice-Session-Start, Tool-Aufrufe) in Postgres
+ * via Neon Serverless Driver.
+ *
+ * Drei Betriebsmodi:
+ * 1. AUDIT_LOG_DISABLED=true  → Nur Console-Log, kein DB-Schreiben
+ * 2. Keine DB-URL gesetzt     → Nur Console-Log (lokale Dev-Umgebung)
+ * 3. DB-URL gesetzt           → Schreibt in Postgres mit graceful fallback
+ *
+ * Resilience: Cold-Start-Timeouts und Connection-Errors werden still
+ * geschluckt. Audit-Log darf User-Aktionen niemals blockieren oder
+ * Logs-Pollution verursachen. Bei echten DB-Problemen sieht der Operator
+ * den ausführlichen Fehler genau einmal pro 5 Minuten.
  *
  * Hinweis zur Connection-URL: Vercel + Neon-Integration setzt die Variablen
  * unter mehreren Namen (DATABASE_URL, POSTGRES_URL, etc.). Wir prüfen
- * beide, damit es egal ist, welcher Storage-Anbieter im Vercel-Projekt
+ * alle, damit es egal ist, welcher Storage-Anbieter im Vercel-Projekt
  * verbunden ist.
  */
 
@@ -34,9 +43,13 @@ export interface AuditEntry {
 }
 
 /**
- * Ermittelt die Datenbank-URL aus den verschiedenen Env-Varianten,
- * die Vercel/Neon setzen.
+ * Ist Audit-Log via DB ausgeschaltet?
+ * AUDIT_LOG_DISABLED=true in Vercel-Env setzen, um nur Console zu nutzen.
  */
+function isAuditDisabled(): boolean {
+  return process.env.AUDIT_LOG_DISABLED === 'true';
+}
+
 function getDatabaseUrl(): string | null {
   return (
     process.env.DATABASE_URL ||
@@ -50,6 +63,7 @@ let cachedSql: NeonQueryFunction<false, false> | null = null;
 
 function getSql(): NeonQueryFunction<false, false> | null {
   if (cachedSql) return cachedSql;
+  if (isAuditDisabled()) return null;
   const url = getDatabaseUrl();
   if (!url) return null;
   cachedSql = neon(url);
@@ -85,17 +99,60 @@ async function ensureTable(): Promise<void> {
 }
 
 /**
+ * Erkennt Cold-Start-Timeouts und Connection-Errors von Neon.
+ * Diese sind erwartbar wenn die DB nach Inaktivität wieder hochgefahren wird,
+ * und sollen die Logs nicht spammen.
+ */
+function isColdStartError(err: any): boolean {
+  if (!err) return false;
+  const msg = String(err?.message || '');
+  const code = err?.sourceError?.cause?.code || err?.code;
+
+  return (
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNREFUSED' ||
+    code === 'ENOTFOUND' ||
+    code === 'ECONNRESET' ||
+    msg.includes('fetch failed') ||
+    msg.includes('Connection terminated') ||
+    msg.includes('Error connecting to database')
+  );
+}
+
+/**
+ * Throttled-Logging: Cold-Start-Fehler werden nur einmal pro 5 Minuten
+ * geloggt, sonst nervt das den Operator nur. Echte DB-Fehler (z.B.
+ * Schema-Probleme, Auth-Fehler) werden immer geloggt.
+ */
+let lastColdStartLog = 0;
+const COLD_START_LOG_THROTTLE_MS = 5 * 60 * 1000;
+
+function logErrorIfNotised(err: any, context: string): void {
+  if (isColdStartError(err)) {
+    const now = Date.now();
+    if (now - lastColdStartLog > COLD_START_LOG_THROTTLE_MS) {
+      console.warn(`[audit] DB unreachable (cold start or network) - audit log skipped. Context: ${context}`);
+      lastColdStartLog = now;
+    }
+    return;
+  }
+  // Echte Fehler (Schema, Auth, etc.) immer loggen
+  console.error(`[audit] ${context}:`, err);
+}
+
+/**
  * Schreibt einen Audit-Eintrag. Wirft niemals - Audit-Fehler dürfen
- * User-Aktionen nicht blockieren.
+ * User-Aktionen nicht blockieren. Cold-Start-Errors werden gethrottled.
  */
 export async function logAuditEvent(entry: AuditEntry, ip?: string): Promise<void> {
-  try {
-    const sql = getSql();
-    if (!sql) {
-      console.log('[audit]', JSON.stringify({ ...entry, ip, timestamp: new Date().toISOString() }));
-      return;
-    }
+  // Wenn DB nicht konfiguriert oder ausgeschaltet: nur Console
+  const sql = getSql();
+  if (!sql) {
+    console.log('[audit]', JSON.stringify({ ...entry, ip, timestamp: new Date().toISOString() }));
+    return;
+  }
 
+  try {
     await ensureTable();
     await sql`
       INSERT INTO audit_log (
@@ -115,7 +172,9 @@ export async function logAuditEvent(entry: AuditEntry, ip?: string): Promise<voi
       )
     `;
   } catch (err) {
-    console.error('[audit] Failed:', err);
+    logErrorIfNotised(err, 'logAuditEvent failed');
+    // Fallback: Console-Log damit der Audit-Trail wenigstens dort ist
+    console.log('[audit-fallback]', JSON.stringify({ ...entry, ip, timestamp: new Date().toISOString() }));
   }
 }
 
@@ -137,7 +196,7 @@ export async function getAuditLog(tenantId: string, limit: number = 100): Promis
     `;
     return rows as any[];
   } catch (err) {
-    console.error('[audit] Query failed:', err);
+    logErrorIfNotised(err, 'getAuditLog failed');
     return [];
   }
 }

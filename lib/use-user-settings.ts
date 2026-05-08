@@ -15,14 +15,18 @@ import { useEffect, useState, useCallback } from 'react';
 
 const STORAGE_KEY = 'anni-user-settings';
 
+export type VoiceMode = 'realtime' | 'pipeline';
+
 export interface UserSettings {
-  voiceId: string | null;        // null = Tenant-Default verwenden
-  listenTimeoutSec: number;       // 3-60
+  voiceId: string | null;          // null = Tenant-Default verwenden
+  listenTimeoutSec: number;         // 3-60
+  voiceMode: VoiceMode;             // 'realtime' = OpenAI Realtime, 'pipeline' = STT+LLM+TTS
 }
 
 const DEFAULT_SETTINGS: UserSettings = {
   voiceId: null,
   listenTimeoutSec: 10,
+  voiceMode: 'realtime',
 };
 
 export const LISTEN_TIMEOUT_MIN = 3;
@@ -45,6 +49,7 @@ function loadSettings(): UserSettings {
       listenTimeoutSec: typeof parsed.listenTimeoutSec === 'number'
         ? clamp(parsed.listenTimeoutSec, LISTEN_TIMEOUT_MIN, LISTEN_TIMEOUT_MAX)
         : DEFAULT_SETTINGS.listenTimeoutSec,
+      voiceMode: parsed.voiceMode === 'pipeline' ? 'pipeline' : 'realtime',
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -88,18 +93,29 @@ export function useUserSettings() {
 
 /**
  * OpenAI-Stimmen, die wir den Usern anbieten.
- * Stand: OpenAI Realtime API, Mai 2026.
- * Beschreibungen sind subjektiv — User können trotzdem alle ausprobieren.
+ *
+ * WICHTIG: Hier listen wir NUR Stimmen, die sowohl von der Realtime API
+ * als auch von der TTS API (für Stimmen-Proben) unterstützt werden.
+ *
+ * Realtime API (Stand Mai 2026, gpt-realtime model):
+ *   alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar
+ *
+ * TTS API (Stand Mai 2026, gpt-4o-mini-tts model):
+ *   alloy, ash, ballad, coral, echo, fable, onyx, nova, sage, shimmer, verse, marin, cedar
+ *
+ * Schnittmenge = was wir hier listen. Falls OpenAI die Listen erweitert,
+ * können neue Stimmen hier ergänzt werden - in beiden APIs verifizieren!
+ *
+ * Beschreibungen sind subjektiv - User können trotzdem alle ausprobieren.
  */
 export const OPENAI_VOICES: { id: string; label: string; description: string }[] = [
+  { id: 'marin', label: 'Marin', description: 'Empfohlen — natürlich, ausdrucksstark' },
+  { id: 'cedar', label: 'Cedar', description: 'Empfohlen — warm, vertrauensvoll' },
   { id: 'alloy', label: 'Alloy', description: 'Neutral, klar' },
   { id: 'ash', label: 'Ash', description: 'Tief, ruhig' },
   { id: 'ballad', label: 'Ballad', description: 'Melodisch, weich' },
   { id: 'coral', label: 'Coral', description: 'Warm, freundlich' },
   { id: 'echo', label: 'Echo', description: 'Männlich, sachlich' },
-  { id: 'fable', label: 'Fable', description: 'Erzählend, ausdrucksstark' },
-  { id: 'nova', label: 'Nova', description: 'Hell, energisch' },
-  { id: 'onyx', label: 'Onyx', description: 'Tief, autoritativ' },
   { id: 'sage', label: 'Sage', description: 'Bedacht, weise' },
   { id: 'shimmer', label: 'Shimmer', description: 'Warm, sanft' },
   { id: 'verse', label: 'Verse', description: 'Vielseitig, modern' },

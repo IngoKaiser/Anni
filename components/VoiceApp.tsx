@@ -10,6 +10,7 @@ import {
 import type { PublicTenantConfig } from '@/lib/tenants';
 import { useSpeechSynthesis } from '@/lib/use-speech-synthesis';
 import { useUserSettings, OPENAI_VOICES, LISTEN_TIMEOUT_MIN, LISTEN_TIMEOUT_MAX } from '@/lib/use-user-settings';
+import { usePipelineVoice } from '@/lib/use-pipeline-voice';
 import VoicePicker from './VoicePicker';
 
 type VoiceState = 'idle' | 'connecting' | 'recording' | 'processing' | 'responding' | 'error';
@@ -145,12 +146,34 @@ export default function VoiceApp({ tenant, user }: Props) {
   // wird die Session automatisch geschlossen.
   const idleTimerRef = useRef<number | null>(null);
 
-  // User-Settings (Voice-Override, Lausch-Timeout)
+  // User-Settings (Voice-Override, Lausch-Timeout, Voice-Mode)
   const { settings, update: updateSettings } = useUserSettings();
 
   const primary = tenant.branding.primary_color;
   const secondary = tenant.branding.secondary_color;
   const isDemoUser = user.isDemoUser;
+
+  // Welcher Voice-Mode ist aktiv?
+  // Demo-User nutzen IMMER Web Speech API (egal was im Setting steht).
+  // Echte User: settings.voiceMode entscheidet zwischen 'realtime' und 'pipeline'.
+  const useRealtimeMode = !isDemoUser && settings.voiceMode === 'realtime';
+  const usePipelineMode = !isDemoUser && settings.voiceMode === 'pipeline';
+
+  // STT/TTS-Pipeline-Hook (sequenziell, push-to-talk)
+  const pipeline = usePipelineVoice({
+    voiceId: settings.voiceId,
+    onTurn: (turn) => {
+      setTurns(prev => [...prev, {
+        id: turn.id,
+        role: turn.role,
+        text: turn.text,
+        timestamp: turn.timestamp,
+      }]);
+    },
+    onError: (msg) => {
+      setError(msg);
+    },
+  });
 
   // Auto-scroll im Dialog-Container, nicht im Window
   useEffect(() => {
@@ -329,49 +352,33 @@ export default function VoiceApp({ tenant, user }: Props) {
    * früheren Versionen wo cleanup direkt nach response.done lief.
    */
   const scheduleReturnToListening = useCallback(() => {
-    const el = audioElRef.current;
     const finalize = () => {
-      // Session bleibt offen - wir hören weiter zu
+      // Session bleibt offen - wir hören weiter zu.
       // Kein cleanupRealtime hier, das passiert nur bei explizitem Abbruch
       // oder wenn der Idle-Timer abläuft.
       if (pcRef.current) {
-        // Connection ist noch offen → zurück in recording, Idle-Timer starten
         setVoiceState('recording');
         startIdleTimer();
       } else {
-        // Connection wurde zwischenzeitlich geschlossen → idle
         setVoiceState('idle');
       }
     };
 
-    if (!el) {
-      finalize();
-      return;
-    }
-
-    // Sicherheits-Polling: bis zu 8 Sekunden warten, dann übergehen
-    const startedAt = Date.now();
-    const maxWaitMs = 8000;
-
-    const check = () => {
-      const elapsed = Date.now() - startedAt;
-      const stillPlaying = el && !el.paused && !el.ended;
-      const stillBuffering = el && el.buffered.length > 0 &&
-        el.currentTime < el.buffered.end(el.buffered.length - 1) - 0.1;
-
-      if (!stillPlaying && !stillBuffering) {
-        if (elapsed >= 500) {
-          finalize();
-          return;
-        }
-      }
-      if (elapsed >= maxWaitMs) {
-        finalize();
-        return;
-      }
-      window.setTimeout(check, 200);
-    };
-    window.setTimeout(check, 500);
+    // WICHTIG: Bei WebRTC (srcObject = MediaStream) ist die buffered/ended/paused
+    // API NICHT zuverlässig - audioEl.buffered ist oft leer, .ended geht nie auf
+    // true weil der Stream weiterläuft. Frühere Versionen hatten daher das Audio
+    // abgeschnitten, weil die Logik zu früh "fertig" gemeldet hat.
+    //
+    // OpenAI sendet output_audio_buffer.stopped erst, wenn der Server-seitige
+    // Buffer komplett geleert ist. Der Client braucht dann typisch 300-800ms
+    // im Jitter-Buffer bis das letzte Audio-Paket abgespielt ist - bei
+    // schwacher Mobilverbindung auch mehr.
+    //
+    // Wir warten daher 1.500ms PAUSCHAL nach 'output_audio_buffer.stopped'.
+    // Das ist ein wenig konservativ, aber zuverlässig - lieber 1s "Stille"
+    // am Ende als ein abgehacktes Wort.
+    const SAFE_TAIL_MS = 1500;
+    window.setTimeout(finalize, SAFE_TAIL_MS);
   }, [startIdleTimer]);
 
 
@@ -617,25 +624,35 @@ export default function VoiceApp({ tenant, user }: Props) {
         setVoiceState('idle');
         setTimeout(() => runDemoFlow(), 200);
       }
+    } else if (usePipelineMode) {
+      // STT/TTS-Pipeline (Sparmodus, Push-to-Talk)
+      // Mapping Pipeline-State → VoiceState:
+      //   idle/error → Tap startet Aufnahme (recording)
+      //   recording  → Tap stoppt Aufnahme, Pipeline läuft (processing → playing)
+      //   processing/playing → Tap bricht ab
+      if (pipeline.state === 'idle' || pipeline.state === 'error') {
+        setError('');
+        pipeline.startRecording();
+      } else if (pipeline.state === 'recording') {
+        pipeline.stopRecording();
+      } else if (pipeline.state === 'playing' || pipeline.state === 'processing') {
+        pipeline.cleanup();
+      }
     } else {
-      // Echte User: OpenAI Realtime mit Server-VAD und kontinuierlichem Dialog
+      // Echte User mit Realtime: OpenAI Realtime mit Server-VAD und kontinuierlichem Dialog
       if (voiceState === 'idle' || voiceState === 'error') {
         // Session starten - bleibt offen für mehrere Turns
         startRealtimeSession();
       } else if (voiceState === 'recording') {
         // Tap während Recording = User möchte Session beenden
-        // (Server-VAD macht das End-of-Turn, Tap ist explizites "Ich bin fertig")
         cleanupRealtime();
         setVoiceState('idle');
       } else if (voiceState === 'processing') {
-        // Tap während Verarbeitung = Session abbrechen
         cleanupRealtime();
         setVoiceState('idle');
       } else if (voiceState === 'responding') {
-        // Tap während Antwort = Antwort unterbrechen, aber Session offen lassen
-        // damit User direkt wieder was sagen kann
+        // Tap während Antwort = Antwort unterbrechen, Session offen lassen
         interruptRealtimeResponse();
-        // State wird auf 'recording' gehen via output_audio_buffer.cleared Event
       }
     }
   };
@@ -644,13 +661,35 @@ export default function VoiceApp({ tenant, user }: Props) {
     setTurns([]);
     setDemoStep(0);
     stopSpeech();
+    if (usePipelineMode) pipeline.cleanup();
   };
 
   const handleLogout = async () => {
     await signOut({ callbackUrl: '/login' });
   };
 
+  // Wenn Pipeline-Modus aktiv ist, übersetzen wir dessen State auf das
+  // bestehende VoiceState-Schema, damit die UI-Anzeige (Button-Animation,
+  // Visualizer, Statustext) wiederverwendet werden kann.
+  const effectiveState: VoiceState = usePipelineMode
+    ? (pipeline.state === 'recording' ? 'recording'
+       : pipeline.state === 'processing' ? 'processing'
+       : pipeline.state === 'playing' ? 'responding'
+       : pipeline.state === 'error' ? 'error'
+       : 'idle')
+    : voiceState;
+
   const buttonLabel = (() => {
+    if (usePipelineMode) {
+      // Pipeline ist Push-to-Talk → andere Texte nötig
+      switch (pipeline.state) {
+        case 'idle': return 'Tippen zum Sprechen';
+        case 'recording': return 'Tippen wenn fertig';
+        case 'processing': return 'Verarbeite…';
+        case 'playing': return 'Antwortet — tippen bricht ab';
+        case 'error': return 'Fehler · neu versuchen';
+      }
+    }
     switch (voiceState) {
       case 'idle': return isDemoUser ? 'Tippen für Demo-Beispiel' : 'Tippen zum Sprechen';
       case 'connecting': return 'Verbinde…';
@@ -771,7 +810,7 @@ export default function VoiceApp({ tenant, user }: Props) {
       {/* Push-to-Talk Footer */}
       <div className="flex-shrink-0 px-4 py-5 bg-white border-t border-stone-100">
         <div className="flex flex-col items-center">
-          <TalkButton voiceState={voiceState} audioLevel={audioLevel} primary={primary} onTap={handleTap} />
+          <TalkButton voiceState={effectiveState} audioLevel={audioLevel} primary={primary} onTap={handleTap} />
           <p className="text-sm text-stone-700 mt-3 font-semibold">{buttonLabel}</p>
           <p className="text-[11px] text-stone-400 mt-1">AirPods · Headset · Spacebar</p>
         </div>
@@ -964,6 +1003,15 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, setti
             </div>
           </section>
 
+          {/* Voice-Mode-Auswahl für echte User */}
+          {!user.isDemoUser && (
+            <VoiceModeSetting
+              voiceMode={settings.voiceMode}
+              onChange={(mode: any) => updateSettings({ voiceMode: mode })}
+              primary={primary}
+            />
+          )}
+
           {/* OpenAI-Voice-Picker für echte User */}
           {!user.isDemoUser && (
             <OpenAIVoicePicker
@@ -1001,8 +1049,8 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, setti
             </section>
           )}
 
-          {/* Lausch-Timeout: nur für echte User relevant (Demo läuft sequenziell ab) */}
-          {!user.isDemoUser && (
+          {/* Lausch-Timeout nur im Realtime-Modus relevant (Pipeline ist Push-to-Talk) */}
+          {!user.isDemoUser && settings.voiceMode === 'realtime' && (
             <ListenTimeoutSetting
               valueSec={settings.listenTimeoutSec}
               onChange={(sec: number) => updateSettings({ listenTimeoutSec: sec })}
@@ -1248,6 +1296,70 @@ function OpenAIVoicePicker({ tenant, selectedVoiceId, onSelect, primary }: any) 
               {isSelected && (
                 <span className="text-[10px] font-semibold" style={{ color: primary }}>aktiv</span>
               )}
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+/* ─────────── Lausch-Timeout Slider ─────────── */
+
+/* ─────────── Voice-Mode Selector ─────────── */
+
+function VoiceModeSetting({ voiceMode, onChange, primary }: any) {
+  const options = [
+    {
+      id: 'realtime',
+      label: 'Premium',
+      description: 'Schnelle Antwort, natürlicher Dialog',
+      cost: '~0,30 EUR/min',
+      latency: '~300ms',
+    },
+    {
+      id: 'pipeline',
+      label: 'Sparmodus',
+      description: 'Push-to-Talk, keine Tools',
+      cost: '~0,01 EUR/min',
+      latency: '~2-3 sek',
+    },
+  ];
+
+  return (
+    <section>
+      <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
+        <Sparkles size={12} /> Voice-Modus
+      </h4>
+      <p className="text-[11px] text-stone-500 mb-3 leading-relaxed">
+        Premium nutzt OpenAI Realtime - schnellste Antwort, kontinuierlicher
+        Dialog, Tool-Aufrufe. Sparmodus nutzt eine günstigere STT/TTS-Pipeline -
+        Push-to-Talk, keine Tools, höhere Latenz.
+      </p>
+      <div className="space-y-1.5">
+        {options.map(opt => {
+          const isSelected = opt.id === voiceMode;
+          return (
+            <button
+              key={opt.id}
+              onClick={() => onChange(opt.id)}
+              className="w-full p-3 rounded-2xl border-2 transition text-left"
+              style={{
+                borderColor: isSelected ? primary : '#E7E5E4',
+                background: isSelected ? `${primary}10` : '#FAFAF9',
+              }}
+            >
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-sm font-semibold text-stone-800">{opt.label}</span>
+                {isSelected && (
+                  <span className="text-[10px] font-semibold" style={{ color: primary }}>aktiv</span>
+                )}
+              </div>
+              <p className="text-[11px] text-stone-500 mb-1.5">{opt.description}</p>
+              <div className="flex gap-3 text-[10px] text-stone-400">
+                <span>💰 {opt.cost}</span>
+                <span>⚡ {opt.latency}</span>
+              </div>
             </button>
           );
         })}

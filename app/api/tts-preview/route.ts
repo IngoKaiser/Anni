@@ -4,10 +4,12 @@ import { auth } from '@/lib/auth';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-// Whitelist - nur valide Voice-IDs durchlassen
+// Whitelist - dieselbe Liste wie /api/session, damit Probe und Realtime
+// dieselben Stimmen anbieten (sonst würde der User in der Probe Stimmen
+// hören, die in einer Realtime-Session zu 400-Fehlern führen).
 const ALLOWED_VOICES = new Set([
-  'alloy', 'ash', 'ballad', 'coral', 'echo', 'fable',
-  'nova', 'onyx', 'sage', 'shimmer', 'verse',
+  'alloy', 'ash', 'ballad', 'coral', 'echo',
+  'sage', 'shimmer', 'verse', 'marin', 'cedar',
 ]);
 
 // Maximale Text-Länge für Proben - verhindert Missbrauch als TTS-Service
@@ -66,6 +68,10 @@ export async function POST(req: NextRequest) {
         model: 'gpt-4o-mini-tts',
         voice,
         input: safeText,
+        // Deutsche Aussprache erzwingen - sonst spricht das Modell die
+        // OpenAI-Voices oft mit englischem Akzent. instructions ist der
+        // dedizierte gpt-4o-mini-tts Parameter für Stil/Akzent/Tempo.
+        instructions: 'Sprich auf Deutsch mit natürlicher, klarer Aussprache. Freundlicher, professioneller Ton einer Pflege-Assistentin.',
         response_format: 'mp3',
         speed: 1.0,
       }),

@@ -21,7 +21,7 @@ branding:
   greeting: "Guten Tag, womit kann ich helfen?"
 
 agent:
-  voice_id: "nova"
+  voice_id: "marin"
   persona: |
     Du bist der Sprach-Assistent für Therapeuten und Pflegekräfte im Reha-Zentrum Waldblick.
     Du hilfst bei Therapie-Doku, Verlaufsbeurteilung und ICD-Codierung.
