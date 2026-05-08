@@ -184,6 +184,23 @@ export default function VoiceApp({ tenant, user }: Props) {
     }
   }, [turns]);
 
+  // Browser-Tab-Title an den aktuellen Modus anpassen.
+  // Wichtig wenn der User in einem anderen Tab ist und zurückkommt -
+  // beim Tab-Wechsel sieht er sofort dass Anni im Übersetzungsmodus ist.
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const baseTitle = 'Anni';
+    if (translatorActive && translatorTarget) {
+      document.title = `🌐 ${translatorTarget.nativeLabel || translatorTarget.label} · ${baseTitle}`;
+    } else {
+      document.title = baseTitle;
+    }
+    return () => {
+      // Beim Unmount Title zurücksetzen
+      document.title = baseTitle;
+    };
+  }, [translatorActive, translatorTarget]);
+
   // Audio-Level Animation für recording state
   useEffect(() => {
     if (voiceState === 'recording' && isDemoUser) {
@@ -713,26 +730,42 @@ export default function VoiceApp({ tenant, user }: Props) {
       className="flex flex-col fixed inset-0 overflow-hidden"
       style={{
         height: '100dvh',
-        background: `linear-gradient(180deg, ${secondary} 0%, #FFFFFF 30%, #FFFFFF 100%)`,
+        // Translator-Modus: erkennbar getönter Hintergrund (lila/rosa-Anflug),
+        // damit der User auch beim Scrollen weiß "ich bin im Übersetzungs-Modus".
+        // Normal-Modus: tenant-spezifischer warmer Hintergrund.
+        background: translatorActive
+          ? 'linear-gradient(180deg, #EEF2FF 0%, #FAF5FF 50%, #FDF2F8 100%)'
+          : `linear-gradient(180deg, ${secondary} 0%, #FFFFFF 30%, #FFFFFF 100%)`,
+        transition: 'background 300ms ease',
       }}
     >
       {/* Header - Standard ODER Translator-Banner */}
       {translatorActive && translatorTarget ? (
         <header
-          className="flex-shrink-0 px-4 py-3 flex items-center justify-between border-b z-30"
+          className="flex-shrink-0 px-4 py-3.5 flex items-center justify-between border-b z-30 shadow-md"
           style={{
             background: 'linear-gradient(135deg, #6366F1 0%, #8B5CF6 50%, #EC4899 100%)',
             borderColor: 'rgba(255,255,255,0.2)',
           }}
         >
           <div className="flex items-center gap-3 min-w-0 flex-1">
-            <div className="w-10 h-10 rounded-2xl flex items-center justify-center bg-white/20 backdrop-blur shrink-0">
-              <Languages size={18} className="text-white" />
+            <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-white/20 backdrop-blur shrink-0 relative">
+              <Languages size={20} className="text-white" />
+              {/* Pulsierender Aktiv-Indikator */}
+              <span className="absolute -top-0.5 -right-0.5 flex h-2.5 w-2.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-300 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-400 border-2 border-white" />
+              </span>
             </div>
             <div className="min-w-0 flex-1">
-              <p className="text-[10px] uppercase tracking-wider text-white/70 font-semibold">
-                {t('translator.banner')}
-              </p>
+              <div className="flex items-center gap-1.5">
+                <p className="text-[10px] uppercase tracking-wider text-white font-bold">
+                  ● {t('translator.banner')}
+                </p>
+                <span className="text-[9px] uppercase tracking-wider text-emerald-300 font-bold animate-pulse">
+                  {t('translator.activeLabel')}
+                </span>
+              </div>
               <div className="flex items-center gap-1.5 text-white text-sm font-semibold mt-0.5">
                 <span className="text-base">{SUPPORTED_LOCALES.find(l => l.code === locale)?.flag || '🌐'}</span>
                 <span className="truncate">{SUPPORTED_LOCALES.find(l => l.code === locale)?.nativeLabel}</span>
@@ -793,6 +826,27 @@ export default function VoiceApp({ tenant, user }: Props) {
             </button>
           </div>
         </header>
+      )}
+
+      {/* Translator-Status: persistenter dünner Streifen direkt unter Banner.
+          Bleibt auch sichtbar wenn der User durch den Dialog scrollt - so dass
+          er IMMER weiß, dass der Modus aktiv ist. */}
+      {translatorActive && translatorTarget && (
+        <div
+          className="flex-shrink-0 px-4 py-1.5 flex items-center justify-center gap-2 border-b border-indigo-100"
+          style={{ background: 'linear-gradient(90deg, #EEF2FF 0%, #FAF5FF 50%, #FDF2F8 100%)' }}
+        >
+          <span className="flex h-2 w-2 relative">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500" />
+          </span>
+          <span className="text-[11px] font-semibold text-indigo-700 tracking-wide">
+            {t('translator.statusActive', {
+              source: SUPPORTED_LOCALES.find(l => l.code === locale)?.nativeLabel || locale,
+              target: translatorTarget.nativeLabel || translatorTarget.label,
+            })}
+          </span>
+        </div>
       )}
 
       {/* Mode Indicator + Tools-Strip - nur im Normal-Modus */}
@@ -1042,30 +1096,45 @@ function TranslatorEmptyState({ sourceLocale, targetLabel, t }: any) {
  * ist die "Übersetzung". Wir gruppieren sie zu Paaren.
  */
 function renderTranslatorTurns(turns: Turn[], sourceLocale: string, target: any, t: (k: string, p?: any) => string) {
-  // Pairs bauen: User → folgender Assistant
+  // Pairs bauen: jeder User-Turn startet einen neuen Pair, der nächste
+  // Assistant-Turn füllt ihn auf. Die Reihenfolge im Translator-Modus ist
+  // immer: User-Aussage → Übersetzung. Wenn zwei User-Turns hintereinander
+  // kommen (z.B. weil der Assistant noch lädt) wird das als zwei separate
+  // Pairs gerendert.
+  //
+  // Verwaiste Assistant-Turns (ohne vorhergehenden User-Turn) sollten im
+  // Translator-Modus durch den verschärften Prompt nicht mehr auftreten.
+  // Wenn sie doch mal kommen (z.B. weil das Modell trotzdem von sich aus
+  // was sagt), filtern wir sie raus - sie passen nicht ins Pärchen-Schema.
   type Pair = { user: Turn | null; assistant: Turn | null };
   const pairs: Pair[] = [];
   let current: Pair = { user: null, assistant: null };
   for (const turn of turns) {
     if (turn.role === 'user') {
-      if (current.user || current.assistant) pairs.push(current);
+      if (current.user) pairs.push(current);
       current = { user: turn, assistant: null };
     } else {
       // assistant
-      if (current.user) {
+      if (current.user && !current.assistant) {
         current.assistant = turn;
         pairs.push(current);
         current = { user: null, assistant: null };
-      } else {
-        // Verwaister Assistant-Turn (z.B. die Begrüßung) - eigener Pair
-        pairs.push({ user: null, assistant: turn });
+      } else if (current.user && current.assistant) {
+        // Schon ein Pärchen voll - der zweite Assistant-Output ist eine
+        // erweiterte/korrigierte Übersetzung. Wir verlängern den Text.
+        current = { user: null, assistant: null };
+        const last = pairs[pairs.length - 1];
+        if (last?.assistant) {
+          last.assistant = { ...last.assistant, text: last.assistant.text + ' ' + turn.text };
+        }
       }
+      // Verwaiste Assistant-Turns ohne User-Vorgänger: ignorieren
     }
   }
-  if (current.user || current.assistant) pairs.push(current);
+  if (current.user) pairs.push(current);
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       {pairs.map((pair, i) => (
         <TranslatorPair key={i} pair={pair} sourceLocale={sourceLocale} target={target} t={t} />
       ))}
@@ -1075,44 +1144,53 @@ function renderTranslatorTurns(turns: Turn[], sourceLocale: string, target: any,
 
 function TranslatorPair({ pair, sourceLocale, target, t }: any) {
   const sourceLang = SUPPORTED_LOCALES.find((l: any) => l.code === sourceLocale);
+  const time = pair.user
+    ? new Date(pair.user.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    : pair.assistant
+      ? new Date(pair.assistant.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+      : '';
+
+  // EINE zusammenhängende Karte mit beiden Sprachen drin.
+  // Bewusst NICHT dialogisch (keine User/Assistant-Bubbles), sondern als
+  // Übersetzungs-Paar präsentiert: Original oben, Übersetzung unten,
+  // getrennt durch eine dünne Linie. Beides ist gleichwertig - keine Seite
+  // ist "der User" oder "die Antwort", beides sind Aussagen die übersetzt
+  // werden.
+
   return (
-    <div className="relative">
-      {/* Original (User-Aussage) */}
+    <div className="rounded-2xl bg-white border border-stone-200 shadow-sm overflow-hidden">
+      {/* Original-Sektion */}
       {pair.user && (
-        <div className="rounded-2xl bg-white border border-stone-200 px-4 py-3 shadow-sm">
-          <div className="flex items-center gap-1.5 mb-1">
-            <span className="text-xs">{sourceLang?.flag || '🌐'}{target?.flag || '🌐'}</span>
+        <div className="px-4 py-3">
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <span className="text-sm">{sourceLang?.flag || '🌐'}</span>
             <span className="text-[10px] uppercase tracking-wider text-stone-400 font-semibold">
-              {t('translator.detected')}
+              {sourceLang?.nativeLabel || t('translator.detected')}
             </span>
+            {time && <span className="text-[10px] font-mono text-stone-300 ml-auto">{time}</span>}
           </div>
-          <p className="text-sm text-stone-800 leading-relaxed">{pair.user.text || '...'}</p>
+          <p className="text-[15px] text-stone-800 leading-snug">{pair.user.text || '…'}</p>
         </div>
       )}
 
-      {/* Verbinder zwischen Original und Übersetzung */}
+      {/* Trenn-Linie zwischen Original und Übersetzung */}
       {pair.user && pair.assistant && (
-        <div className="flex justify-center my-1">
-          <div className="w-0.5 h-4 bg-gradient-to-b from-stone-200 to-indigo-200" />
-        </div>
+        <div className="border-t border-stone-100" />
       )}
 
-      {/* Übersetzung (Assistant) */}
+      {/* Übersetzungs-Sektion */}
       {pair.assistant && (
         <div
-          className="rounded-2xl px-4 py-3 shadow-sm"
-          style={{
-            background: 'linear-gradient(135deg, #EEF2FF 0%, #FDF2F8 100%)',
-            border: '1px solid #E0E7FF',
-          }}
+          className="px-4 py-3"
+          style={{ background: 'linear-gradient(135deg, #FAFAFC 0%, #FDF8FB 100%)' }}
         >
-          <div className="flex items-center gap-1.5 mb-1">
-            <Languages size={12} className="text-indigo-600" />
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <span className="text-sm">{target?.flag || '🌐'}</span>
             <span className="text-[10px] uppercase tracking-wider text-indigo-600 font-semibold">
-              {t('translator.translation')}
+              {target?.nativeLabel || target?.label || t('translator.translation')}
             </span>
           </div>
-          <p className="text-sm text-stone-800 leading-relaxed">{pair.assistant.text || '...'}</p>
+          <p className="text-[15px] text-stone-800 leading-snug">{pair.assistant.text || '…'}</p>
         </div>
       )}
     </div>

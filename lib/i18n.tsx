@@ -228,6 +228,8 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
 
     // Translator-Modus
     'translator.banner': 'Übersetzungsmodus',
+    'translator.activeLabel': 'AKTIV',
+    'translator.statusActive': 'Übersetzung aktiv: {source} ↔ {target}',
     'translator.bannerSub': 'Anni dolmetscht zwischen {source} und {target}',
     'translator.askLanguage': 'In welche Sprache soll übersetzt werden?',
     'translator.detecting': 'Sprache wird erkannt…',
@@ -348,6 +350,8 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.timeout.costHint': 'Note: longer listen times slightly increase OpenAI costs.',
 
     'translator.banner': 'Translation mode',
+    'translator.activeLabel': 'ACTIVE',
+    'translator.statusActive': 'Translation active: {source} ↔ {target}',
     'translator.bannerSub': 'Anni interprets between {source} and {target}',
     'translator.askLanguage': 'Which language should I translate to?',
     'translator.detecting': 'Detecting language…',
@@ -467,6 +471,8 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.timeout.costHint': 'Nota: tempi più lunghi aumentano leggermente i costi OpenAI.',
 
     'translator.banner': 'Modalità traduzione',
+    'translator.activeLabel': 'ATTIVA',
+    'translator.statusActive': 'Traduzione attiva: {source} ↔ {target}',
     'translator.bannerSub': 'Anni traduce tra {source} e {target}',
     'translator.askLanguage': 'In quale lingua devo tradurre?',
     'translator.detecting': 'Rilevamento lingua…',
@@ -586,6 +592,8 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.timeout.costHint': 'Note : des durées plus longues augmentent légèrement les coûts OpenAI.',
 
     'translator.banner': 'Mode traduction',
+    'translator.activeLabel': 'ACTIF',
+    'translator.statusActive': 'Traduction active : {source} ↔ {target}',
     'translator.bannerSub': 'Anni interprète entre {source} et {target}',
     'translator.askLanguage': 'Vers quelle langue dois-je traduire ?',
     'translator.detecting': 'Détection de la langue…',
@@ -705,6 +713,8 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.timeout.costHint': 'Nota: tiempos más largos aumentan ligeramente los costes de OpenAI.',
 
     'translator.banner': 'Modo traducción',
+    'translator.activeLabel': 'ACTIVO',
+    'translator.statusActive': 'Traducción activa: {source} ↔ {target}',
     'translator.bannerSub': 'Anni interpreta entre {source} y {target}',
     'translator.askLanguage': '¿A qué idioma debo traducir?',
     'translator.detecting': 'Detectando idioma…',
