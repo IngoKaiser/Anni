@@ -443,12 +443,21 @@ export default function VoiceApp({ tenant, user }: Props) {
         let args: any = {};
         try { args = JSON.parse(ev.arguments); } catch {}
 
+        // Diagnose-Log für Tool-Calls. Hilft zu sehen, ob das Modell die
+        // System-Tools korrekt aufruft - bei Bedarf in DevTools nachschauen.
+        console.log('[tool] Call:', toolName, args);
+
         // System-Tool: Translator starten
         if (toolName === 'start_translation_mode') {
-          const target = typeof args.targetLanguage === 'string' ? args.targetLanguage : 'unknown';
+          const target = typeof args.targetLanguage === 'string' && args.targetLanguage.length > 0
+            ? args.targetLanguage
+            : 'unknown';
+          console.log('[translator] Starting mode for target:', target);
+          // Sofortiges visuelles Feedback - User soll sehen dass was passiert,
+          // auch während die neue Session aufgebaut wird (~1-2s).
+          setVoiceState('connecting');
           // Aktuelle Session schließen und neue Translator-Session starten
           cleanupRealtime();
-          setVoiceState('idle');
           // Kleiner Tick damit cleanup komplett durchläuft
           setTimeout(() => {
             startRealtimeSession({ translatorTarget: target });
@@ -458,6 +467,7 @@ export default function VoiceApp({ tenant, user }: Props) {
 
         // System-Tool: Translator beenden
         if (toolName === 'stop_translation_mode') {
+          console.log('[translator] Stopping mode');
           cleanupRealtime();
           setTranslatorActive(false);
           setTranslatorTarget(null);

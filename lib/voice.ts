@@ -73,12 +73,29 @@ ${toolDescriptions}
 Nutze die Tools selbständig, wenn der Nutzer eine Anfrage stellt, die zu einem Tool passt.
 Bestätige Tool-Aufrufe verbal kurz und prägnant.
 
-ÜBERSETZUNGSMODUS:
-Wenn der Nutzer "Übersetzung starten", "start translation", "avvia traduzione",
-"démarrer traduction", "iniciar traducción" oder ähnlich sagt, rufe das Tool
-start_translation_mode auf. Frage VORHER nach der Zielsprache, falls nicht erwähnt.
-Wenn der Nutzer sagt er kennt die Sprache nicht, übergib "unknown" als targetLanguage -
-das System erkennt sie dann anhand der nächsten Aussage selbst.
+# ÜBERSETZUNGSMODUS
+
+Du hast ein Tool "start_translation_mode" für Dolmetscher-Anfragen. Es gibt nur ZWEI Pfade:
+
+## PFAD A: Sprache wurde direkt genannt
+Beispiele: "Übersetze ins Polnische", "Translation to English", "Dolmetscher für Türkisch"
+→ Rufe SOFORT start_translation_mode mit der genannten Sprache auf.
+→ KEINE verbale Antwort vorher. Direkt Tool aufrufen.
+
+## PFAD B: Sprache fehlt
+Beispiele: "Übersetzung starten", "Dolmetscher", "Translation mode"
+→ Frage genau einmal kurz: "In welche Sprache?"
+→ SOBALD der Nutzer eine Sprache nennt (z.B. nur das Wort "Polnisch", "Polish", "Türkisch"),
+   rufe SOFORT start_translation_mode mit dieser Sprache auf.
+→ Wenn der Nutzer sagt "weiß ich nicht", "unbekannt", "no idea":
+   rufe start_translation_mode mit targetLanguage="unknown" auf.
+→ KEINE Bestätigung wie "Okay, dann übersetze ich nach Polnisch". Sofort Tool aufrufen.
+
+## WICHTIG
+- Nach dem Tool-Aufruf wird das System auf Übersetzungsmodus umschalten.
+- Du sollst NICHT die Übersetzung selbst machen - das Tool macht das.
+- Nach "In welche Sprache?" und der Antwort des Users ist die NÄCHSTE Aktion IMMER der Tool-Aufruf.
+- Mache niemals zwei Nachfragen hintereinander.
 
 WICHTIG: ${langInstruction} Antworte immer auf ${langName}.`;
 }
@@ -108,15 +125,20 @@ const SYSTEM_TOOLS: any[] = [
     type: 'function',
     name: 'start_translation_mode',
     description:
-      'Startet den Übersetzungsmodus zwischen der App-Sprache und einer anderen Sprache. ' +
-      'Aufrufen wenn der Nutzer eine Übersetzungs-Anfrage stellt. ' +
-      'targetLanguage ist die Zielsprache als Wort (z.B. "Polnisch", "Polish"), oder "unknown".',
+      'Aktiviert den bidirektionalen Dolmetscher-Modus. NACH diesem Tool-Aufruf wird das System auf einen ' +
+      'speziellen Übersetzungs-Modus umschalten - der Nutzer kann dann frei zwischen App-Sprache und Zielsprache ' +
+      'wechseln und alles wird übersetzt. ' +
+      'WANN AUFRUFEN: (1) Direkt wenn Nutzer eine Sprache nennt zusammen mit Übersetzungs-Wunsch ' +
+      '("Übersetze ins Polnische") - sofort aufrufen. (2) Nach einer Rückfrage "In welche Sprache?" ' +
+      'sobald der Nutzer eine Sprache nennt - sofort aufrufen, NICHT weiter unterhalten. ' +
+      'targetLanguage: Sprache als deutsches/englisches Wort ("Polnisch", "Polish", "Türkisch"). ' +
+      'Falls Nutzer Sprache nicht kennt: "unknown".',
     parameters: {
       type: 'object',
       properties: {
         targetLanguage: {
           type: 'string',
-          description: 'Die Zielsprache, oder "unknown" wenn aus dem Kontext erkannt werden soll.',
+          description: 'Die Zielsprache als Wort (z.B. "Polnisch", "Türkisch", "Englisch") oder "unknown".',
         },
       },
       required: ['targetLanguage'],

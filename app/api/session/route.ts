@@ -73,6 +73,13 @@ export async function POST(req: NextRequest) {
     const sourceLocale = requestedLocale || 'en';
     const lang = resolveLanguage(body.translatorTarget, sourceLocale);
 
+    console.log('[session] Translator request:', {
+      requestedTarget: body.translatorTarget,
+      sourceLocale,
+      resolvedLabel: lang.displayLabel,
+      resolvedCode: lang.code,
+    });
+
     translatorOverride = {
       systemPrompt: buildTranslatorPrompt(
         sourceLocale,
