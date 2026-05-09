@@ -134,6 +134,22 @@ export default function VoiceApp({ tenant, user }: Props) {
   const [demoStep, setDemoStep] = useState(0);
   const [error, setError] = useState('');
 
+  // Debug-Log direkt in der UI sichtbar - hilft beim Diagnostizieren von
+  // Tool-Call-Problemen ohne DevTools-Console.
+  // Aktiviert per ?debug=1 in URL ODER wenn translator wird gerade aktiviert.
+  const [debugLog, setDebugLog] = useState<string[]>([]);
+  const [debugVisible, setDebugVisible] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (new URLSearchParams(window.location.search).get('debug') === '1') {
+      setDebugVisible(true);
+    }
+  }, []);
+  const debugAdd = useCallback((msg: string) => {
+    const ts = new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    setDebugLog(prev => [...prev.slice(-49), `${ts} ${msg}`]);
+  }, []);
+
   // Translator-Mode-State
   // - translatorActive: ist der Modus überhaupt an (UI auf eigenen Bildschirm)?
   // - translatorTarget: kompletter Info-Block über die Zielsprache
@@ -399,9 +415,83 @@ export default function VoiceApp({ tenant, user }: Props) {
     window.setTimeout(finalize, SAFE_TAIL_MS);
   }, [startIdleTimer]);
 
+  // Tool-Call-Dispatcher mit Idempotenz. Wird aus DREI verschiedenen Events
+  // aufgerufen (function_call_arguments.done, output_item.done, response.done) -
+  // um sicherzustellen dass wir Tool-Calls nicht verpassen, egal welches Event
+  // OpenAI gerade schickt. Idempotenz via call_id verhindert dass derselbe
+  // Tool-Call mehrfach ausgeführt wird.
+  const handledToolCallsRef = useRef<Set<string>>(new Set());
 
+  const dispatchToolCall = useCallback((toolName: string, args: any, callId?: string) => {
+    if (!toolName) return;
+
+    // Idempotenz: jeder call_id nur einmal verarbeiten
+    const key = callId || `${toolName}-${JSON.stringify(args)}`;
+    if (handledToolCallsRef.current.has(key)) {
+      debugAdd(`tool ${toolName} duplicate (skip)`);
+      return;
+    }
+    handledToolCallsRef.current.add(key);
+
+    debugAdd(`→ DISPATCH ${toolName}`);
+
+    // System-Tool: Translator starten
+    if (toolName === 'start_translation_mode') {
+      const target = typeof args?.targetLanguage === 'string' && args.targetLanguage.length > 0
+        ? args.targetLanguage
+        : 'unknown';
+      debugAdd(`→ start_translation_mode target="${target}"`);
+      setVoiceState('connecting');
+      cleanupRealtime();
+      setTimeout(() => {
+        startRealtimeSession({ translatorTarget: target });
+      }, 200);
+      return;
+    }
+
+    // System-Tool: Translator beenden
+    if (toolName === 'stop_translation_mode') {
+      debugAdd('→ stop_translation_mode');
+      cleanupRealtime();
+      setTranslatorActive(false);
+      setTranslatorTarget(null);
+      setTurns([]);
+      setVoiceState('idle');
+      return;
+    }
+
+    // Normales Tenant-Tool
+    if (currentAssistantTurnRef.current) {
+      const id = currentAssistantTurnRef.current.id;
+      const tool = tenant.tools.find(t => t.id === toolName);
+      setTurns(prev => prev.map(t =>
+        t.id === id
+          ? { ...t, toolCalls: [...(t.toolCalls || []), { id: toolName, label: tool?.label || toolName }] }
+          : t
+      ));
+      fetch('/api/tools/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toolId: toolName, args }),
+      }).catch(() => {});
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenant, debugAdd]);
 
   const handleRealtimeEvent = (ev: any) => {
+    // Jeder Event-Typ kommt ins Debug-Log. So sehen wir genau was OpenAI sendet.
+    // Wir filtern die hochfrequenten Audio-Delta-Events raus damit das Log
+    // lesbar bleibt - die geben keine Aufschlüsse über Tool-Calls.
+    if (ev?.type &&
+        !ev.type.startsWith('response.audio.') &&
+        !ev.type.startsWith('response.audio_transcript.delta') &&
+        !ev.type.startsWith('response.text.delta') &&
+        ev.type !== 'response.function_call_arguments.delta' &&
+        ev.type !== 'output_audio_buffer.audio_started' &&
+        ev.type !== 'output_audio_buffer.audio_stopped') {
+      debugAdd(`ev: ${ev.type}`);
+    }
+
     switch (ev.type) {
       case 'input_audio_buffer.speech_started':
         // User redet - Idle-Timer abbrechen, sonst würde Session
@@ -438,67 +528,50 @@ export default function VoiceApp({ tenant, user }: Props) {
           setTurns(prev => prev.map(t => t.id === id ? { ...t, text: t.text + ev.delta } : t));
         }
         break;
+      case 'response.function_call_arguments.delta':
+        // Argumente streamen rein, Stück für Stück. Wir sammeln sie nicht
+        // selbst, das macht die `done`-Variante (siehe unten) bequemer.
+        debugAdd(`fn-args.delta name=${ev.name || '?'}`);
+        break;
       case 'response.function_call_arguments.done': {
-        const toolName = ev.name;
+        debugAdd(`fn-args.done name=${ev.name || '?'} args=${(ev.arguments || '').slice(0, 80)}`);
         let args: any = {};
         try { args = JSON.parse(ev.arguments); } catch {}
-
-        // Diagnose-Log für Tool-Calls. Hilft zu sehen, ob das Modell die
-        // System-Tools korrekt aufruft - bei Bedarf in DevTools nachschauen.
-        console.log('[tool] Call:', toolName, args);
-
-        // System-Tool: Translator starten
-        if (toolName === 'start_translation_mode') {
-          const target = typeof args.targetLanguage === 'string' && args.targetLanguage.length > 0
-            ? args.targetLanguage
-            : 'unknown';
-          console.log('[translator] Starting mode for target:', target);
-          // Sofortiges visuelles Feedback - User soll sehen dass was passiert,
-          // auch während die neue Session aufgebaut wird (~1-2s).
-          setVoiceState('connecting');
-          // Aktuelle Session schließen und neue Translator-Session starten
-          cleanupRealtime();
-          // Kleiner Tick damit cleanup komplett durchläuft
-          setTimeout(() => {
-            startRealtimeSession({ translatorTarget: target });
-          }, 200);
-          break;
-        }
-
-        // System-Tool: Translator beenden
-        if (toolName === 'stop_translation_mode') {
-          console.log('[translator] Stopping mode');
-          cleanupRealtime();
-          setTranslatorActive(false);
-          setTranslatorTarget(null);
-          setTurns([]);
-          setVoiceState('idle');
-          break;
-        }
-
-        // Normales Tenant-Tool
-        if (currentAssistantTurnRef.current) {
-          const id = currentAssistantTurnRef.current.id;
-          const tool = tenant.tools.find(t => t.id === toolName);
-          setTurns(prev => prev.map(t =>
-            t.id === id
-              ? { ...t, toolCalls: [...(t.toolCalls || []), { id: toolName, label: tool?.label || toolName }] }
-              : t
-          ));
-          fetch('/api/tools/execute', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ toolId: toolName, args }),
-          }).catch(() => {});
+        dispatchToolCall(ev.name, args, ev.call_id);
+        break;
+      }
+      case 'response.output_item.done': {
+        // Fallback: dieses Event kommt zuverlässiger als fn-args.done und
+        // enthält das gesamte function_call-Item. Wir nutzen es als Backup.
+        const item = ev.item;
+        if (item && item.type === 'function_call') {
+          debugAdd(`output_item.done function_call name=${item.name} args=${(item.arguments || '').slice(0, 80)}`);
+          let args: any = {};
+          try { args = JSON.parse(item.arguments || '{}'); } catch {}
+          dispatchToolCall(item.name, args, item.call_id);
+        } else if (item) {
+          debugAdd(`output_item.done type=${item.type}`);
         }
         break;
       }
-      case 'response.done':
-        // Server ist fertig mit Generieren - Response-ID räumen damit
-        // ein nachträglicher Tap nicht mehr cancellt.
+      case 'response.done': {
+        // Letzte Sicherheit: response.done enthält das vollständige Output.
+        // Falls die anderen Events übersprungen wurden (z.B. weil das Modell
+        // nur einen function_call ohne Streaming geliefert hat), finden wir
+        // den Tool-Call hier.
+        const output = ev.response?.output || [];
+        for (const item of output) {
+          if (item?.type === 'function_call' && item.name) {
+            debugAdd(`response.done found function_call name=${item.name}`);
+            let args: any = {};
+            try { args = JSON.parse(item.arguments || '{}'); } catch {}
+            dispatchToolCall(item.name, args, item.call_id);
+          }
+        }
         currentAssistantTurnRef.current = null;
         activeResponseIdRef.current = null;
         break;
+      }
       case 'output_audio_buffer.stopped':
         // Audio durchgespielt → zurück in recording, Idle-Timer starten.
         // Session bleibt offen für nächsten User-Input.
@@ -541,6 +614,9 @@ export default function VoiceApp({ tenant, user }: Props) {
   const startRealtimeSession = async (opts?: { translatorTarget?: string }) => {
     setError('');
     setVoiceState('connecting');
+    // Idempotenz-Set leeren - neue Session, frische Tool-Calls erwartet
+    handledToolCallsRef.current.clear();
+    debugAdd(`session.start translator=${opts?.translatorTarget || '-'}`);
 
     try {
       const tokenRes = await fetch('/api/session', {
@@ -959,6 +1035,47 @@ export default function VoiceApp({ tenant, user }: Props) {
           setLocale={setLocale}
           t={t}
         />
+      )}
+
+      {/* Debug-Panel: zeigt alle Realtime-Events live an. Nur sichtbar wenn
+          die App mit ?debug=1 aufgerufen wurde. Zur Diagnose von Tool-Call-
+          Problemen (siehst was OpenAI tatsächlich schickt). */}
+      {debugVisible && (
+        <div className="fixed bottom-2 right-2 left-2 sm:left-auto sm:w-96 max-h-[40vh] bg-black/90 text-emerald-300 rounded-2xl p-3 z-50 font-mono text-[10px] flex flex-col shadow-2xl">
+          <div className="flex items-center justify-between mb-2 text-white">
+            <span className="font-bold">🐞 DEBUG · {debugLog.length} events</span>
+            <div className="flex gap-1">
+              <button
+                onClick={() => setDebugLog([])}
+                className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-[10px]"
+              >clear</button>
+              <button
+                onClick={() => setDebugVisible(false)}
+                className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-[10px]"
+              >×</button>
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto space-y-0.5">
+            {debugLog.length === 0 && <p className="text-stone-500 italic">No events yet</p>}
+            {debugLog.map((line, i) => (
+              <div key={i} className={
+                line.includes('DISPATCH') ? 'text-yellow-300 font-bold' :
+                line.includes('start_translation') ? 'text-pink-300 font-bold' :
+                line.includes('stop_translation') ? 'text-pink-300' :
+                line.includes('fn-args') || line.includes('function_call') ? 'text-cyan-300' :
+                'text-emerald-300/70'
+              }>{line}</div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Floating Debug-Toggle wenn Panel zu, aber Param gesetzt */}
+      {!debugVisible && typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1' && (
+        <button
+          onClick={() => setDebugVisible(true)}
+          className="fixed bottom-2 right-2 w-10 h-10 rounded-full bg-black/80 text-emerald-300 z-50 shadow-lg text-base"
+        >🐞</button>
       )}
     </div>
   );
