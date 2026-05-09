@@ -434,6 +434,61 @@ export default function VoiceApp({ tenant, user }: Props) {
   // Ref hält die Aussage zwischen startRealtimeSession und dc.onopen.
   const pendingInitialMessageRef = useRef<string | undefined>(undefined);
 
+  // Letztes vollständiges User-Transkript - wird benutzt um zu prüfen ob
+  // der Agent-Name als Trigger-Prefix gesagt wurde, bevor wir
+  // start_/stop_translation_mode wirklich ausführen.
+  // Das Modell hält sich nicht zuverlässig an die "nur mit Prefix"-Anweisung
+  // im Prompt, also enforcement im Code.
+  const lastUserTranscriptRef = useRef<string>('');
+
+  /**
+   * Prüft ob das letzte User-Transkript den Agent-Namen als Trigger-Wort enthält.
+   * Robust gegen:
+   * - Groß/Klein-Schreibung
+   * - Satzzeichen direkt nach dem Namen ("Anni,", "Anni.", "Anni!")
+   * - Verschiedene Aussprache-Transkriptionen ("Annie", "Annik" → false negative ist okay,
+   *   der User wird's merken und richtig sprechen)
+   *
+   * Match-Logik: Name als isoliertes Wort (Wortgrenze davor und danach).
+   * Ein Vorkommen reicht - Position ist egal (Anfang/Mitte/Ende).
+   */
+  const hasAgentPrefix = useCallback((transcript: string): boolean => {
+    if (!transcript) return false;
+    const name = (settings.agentName || 'Anni').trim();
+    if (!name) return false;
+    // Word-Boundary-Match, case-insensitive, Unicode-aware (für Namen mit Umlauten)
+    // Beispiel-Pattern für Name="Anni": /\banni\b/iu
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`\\b${escaped}\\b`, 'iu');
+    return re.test(transcript);
+  }, [settings.agentName]);
+
+  /**
+   * Antwort an OpenAI nach abgelehntem Tool-Call: Tool-Output mit Fehler-Hinweis,
+   * damit das Modell normal weiterredet statt zu warten oder zu wiederholen.
+   * Ohne diesen Output bleibt das Modell hängen und sendet nichts mehr.
+   */
+  const sendToolRejection = useCallback((callId: string | undefined, reason: string) => {
+    const dc = dcRef.current;
+    if (!dc || dc.readyState !== 'open' || !callId) return;
+    try {
+      // Function-Output mit Fehler an die Conversation hängen
+      dc.send(JSON.stringify({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: JSON.stringify({ error: reason, action: 'continue_conversation' }),
+        },
+      }));
+      // Modell anweisen, eine normale Sprach-Antwort zu generieren
+      dc.send(JSON.stringify({ type: 'response.create' }));
+      debugAdd(`tool rejected: ${reason}`);
+    } catch (err) {
+      debugAdd(`reject failed: ${err}`);
+    }
+  }, [debugAdd]);
+
   const dispatchToolCall = useCallback((toolName: string, args: any, callId?: string) => {
     if (!toolName) return;
 
@@ -449,6 +504,19 @@ export default function VoiceApp({ tenant, user }: Props) {
 
     // System-Tool: Translator starten
     if (toolName === 'start_translation_mode') {
+      // ENFORCEMENT: Prefix muss im letzten User-Transkript stehen.
+      // Das Modell hält sich nicht zuverlässig an die Prompt-Anweisung,
+      // also Hard-Check im Code.
+      const transcript = lastUserTranscriptRef.current;
+      if (!hasAgentPrefix(transcript)) {
+        debugAdd(`✗ start_translation_mode REJECTED: no prefix in "${transcript.slice(0, 60)}"`);
+        sendToolRejection(
+          callId,
+          `Translation mode can only be activated when the user says "${settings.agentName}" as a prefix. The last user message was: "${transcript}". Please respond conversationally - do NOT activate translation mode.`
+        );
+        return;
+      }
+
       const target = typeof args?.targetLanguage === 'string' && args.targetLanguage.length > 0
         ? args.targetLanguage
         : 'unknown';
@@ -463,6 +531,17 @@ export default function VoiceApp({ tenant, user }: Props) {
 
     // System-Tool: Translator beenden
     if (toolName === 'stop_translation_mode') {
+      // Auch hier: Prefix-Check.
+      const transcript = lastUserTranscriptRef.current;
+      if (!hasAgentPrefix(transcript)) {
+        debugAdd(`✗ stop_translation_mode REJECTED: no prefix in "${transcript.slice(0, 60)}"`);
+        sendToolRejection(
+          callId,
+          `Translation mode can only be ended when the user says "${settings.agentName}" as a prefix. The last user message was: "${transcript}". Please translate the message normally - do NOT end translation mode.`
+        );
+        return;
+      }
+
       debugAdd('→ stop_translation_mode');
       cleanupRealtime();
       setTranslatorActive(false);
@@ -472,7 +551,7 @@ export default function VoiceApp({ tenant, user }: Props) {
       return;
     }
 
-    // Normales Tenant-Tool
+    // Normales Tenant-Tool - kein Prefix-Check nötig, das ist gewünschtes Verhalten
     if (currentAssistantTurnRef.current) {
       const id = currentAssistantTurnRef.current.id;
       const tool = tenant.tools.find(t => t.id === toolName);
@@ -488,7 +567,7 @@ export default function VoiceApp({ tenant, user }: Props) {
       }).catch(() => {});
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenant, debugAdd]);
+  }, [tenant, debugAdd, hasAgentPrefix, sendToolRejection, settings.agentName]);
 
   const handleRealtimeEvent = (ev: any) => {
     // Jeder Event-Typ kommt ins Debug-Log. So sehen wir genau was OpenAI sendet.
@@ -524,6 +603,13 @@ export default function VoiceApp({ tenant, user }: Props) {
           const id = currentUserTurnRef.current.id;
           setTurns(prev => prev.map(t => t.id === id ? { ...t, text: ev.transcript } : t));
           currentUserTurnRef.current = null;
+        }
+        // Letztes Transkript merken für Prefix-Validierung bei Tool-Calls.
+        // Wir lowercase'n + normalisieren Whitespace, damit der Match
+        // robust ist gegen Aussprache-Variationen ("Anni," "anni." etc).
+        if (typeof ev.transcript === 'string') {
+          lastUserTranscriptRef.current = ev.transcript;
+          debugAdd(`transcript: "${ev.transcript.slice(0, 60)}"`);
         }
         break;
       case 'response.created':
@@ -636,6 +722,9 @@ export default function VoiceApp({ tenant, user }: Props) {
     setVoiceState('connecting');
     // Idempotenz-Set leeren - neue Session, frische Tool-Calls erwartet
     handledToolCallsRef.current.clear();
+    // Stale Transkript räumen - sonst würde ein altes Transkript der vorherigen
+    // Session den Prefix-Check für die neue Session beeinflussen.
+    lastUserTranscriptRef.current = '';
     debugAdd(`session.start translator=${opts?.translatorTarget || '-'}${opts?.initialUserMessage ? ' withMsg' : ''}`);
 
     // initialUserMessage merken für dc.onopen
