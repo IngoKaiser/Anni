@@ -11,7 +11,7 @@ import {
 import type { PublicTenantConfig } from '@/lib/tenants';
 import { useSpeechSynthesis } from '@/lib/use-speech-synthesis';
 import { useUserSettings, OPENAI_VOICES, LISTEN_TIMEOUT_MIN, LISTEN_TIMEOUT_MAX, vadSensitivityToParams } from '@/lib/use-user-settings';
-import { useI18n, SUPPORTED_LOCALES, VOICE_PREVIEW_TEXTS, type Locale } from '@/lib/i18n';
+import { useI18n, SUPPORTED_LOCALES, buildVoicePreviewText, type Locale } from '@/lib/i18n';
 import VoicePicker from './VoicePicker';
 
 type VoiceState = 'idle' | 'connecting' | 'recording' | 'processing' | 'responding' | 'error';
@@ -124,7 +124,7 @@ const DEMO_FLOWS: Record<string, Array<{ user: string; assistant: string; tool?:
 };
 
 export default function VoiceApp({ tenant, user }: Props) {
-  const { t, locale, setLocale } = useI18n();
+  const { t, locale, setLocale, setAgentName } = useI18n();
 
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -187,6 +187,13 @@ export default function VoiceApp({ tenant, user }: Props) {
 
   // User-Settings (Voice-Override, Lausch-Timeout, Voice-Mode)
   const { settings, update: updateSettings } = useUserSettings();
+
+  // Agent-Name aus Settings in den i18n-Context übertragen, damit alle
+  // {name}-Platzhalter in t() automatisch den richtigen Namen bekommen.
+  // Wirkt sich auf UI-Strings, Stimmprobe, Voice-Trigger gleichermaßen aus.
+  useEffect(() => {
+    setAgentName(settings.agentName);
+  }, [settings.agentName, setAgentName]);
 
   const primary = tenant.branding.primary_color;
   const secondary = tenant.branding.secondary_color;
@@ -422,6 +429,11 @@ export default function VoiceApp({ tenant, user }: Props) {
   // Tool-Call mehrfach ausgeführt wird.
   const handledToolCallsRef = useRef<Set<string>>(new Set());
 
+  // Wenn der User über die Tools-Pille einen Dialog startet, schicken wir
+  // beim Connection-Open eine simulierte User-Aussage ans Modell. Dieser
+  // Ref hält die Aussage zwischen startRealtimeSession und dc.onopen.
+  const pendingInitialMessageRef = useRef<string | undefined>(undefined);
+
   const dispatchToolCall = useCallback((toolName: string, args: any, callId?: string) => {
     if (!toolName) return;
 
@@ -611,12 +623,23 @@ export default function VoiceApp({ tenant, user }: Props) {
     }
   };
 
-  const startRealtimeSession = async (opts?: { translatorTarget?: string }) => {
+  const startRealtimeSession = async (opts?: {
+    translatorTarget?: string;
+    /**
+     * Optional: nach Connection-Open eine User-Message ins Conversation-Item
+     * einspielen. Wird genutzt wenn der User auf eine Tool-Pille klickt -
+     * dann simulieren wir "User hat das Kommando gesagt".
+     */
+    initialUserMessage?: string;
+  }) => {
     setError('');
     setVoiceState('connecting');
     // Idempotenz-Set leeren - neue Session, frische Tool-Calls erwartet
     handledToolCallsRef.current.clear();
-    debugAdd(`session.start translator=${opts?.translatorTarget || '-'}`);
+    debugAdd(`session.start translator=${opts?.translatorTarget || '-'}${opts?.initialUserMessage ? ' withMsg' : ''}`);
+
+    // initialUserMessage merken für dc.onopen
+    pendingInitialMessageRef.current = opts?.initialUserMessage;
 
     try {
       const tokenRes = await fetch('/api/session', {
@@ -625,8 +648,11 @@ export default function VoiceApp({ tenant, user }: Props) {
         body: JSON.stringify({
           // User-Auswahl der Stimme (oder null für Tenant-Default)
           voiceId: settings.voiceId,
-          // App-Sprache → Anni antwortet darin
+          // App-Sprache → Agent antwortet darin
           locale,
+          // Agent-Name: wird als Trigger-Wort für Modus-Wechsel im Prompt
+          // eingebaut, daher muss er bei jeder Session mitgegeben werden.
+          agentName: settings.agentName,
           // VAD-Empfindlichkeit: bestimmt wie laut/lange der User reden muss
           // damit die KI das als Sprache erkennt (vs. Hintergrundgeräusch).
           vadParams: vadSensitivityToParams(settings.vadSensitivity),
@@ -715,6 +741,33 @@ export default function VoiceApp({ tenant, user }: Props) {
           debugAdd(`session.update sent: ${(session.tools || []).length} tools, translator=${session.isTranslator}`);
         } catch (err) {
           debugAdd(`session.update FAILED: ${err}`);
+        }
+
+        // Wenn der User über eine Tool-Pille gestartet hat: simulierte
+        // User-Message ins Conversation-Item schicken und Response triggern.
+        // Das Modell verhält sich dann so, als hätte der User das Kommando
+        // tatsächlich gesprochen - ruft also das passende Tenant-Tool auf.
+        const initialMsg = pendingInitialMessageRef.current;
+        if (initialMsg) {
+          pendingInitialMessageRef.current = undefined;
+          try {
+            // Kleine Verzögerung damit session.update sicher verarbeitet ist
+            setTimeout(() => {
+              if (!dcRef.current || dcRef.current.readyState !== 'open') return;
+              dcRef.current.send(JSON.stringify({
+                type: 'conversation.item.create',
+                item: {
+                  type: 'message',
+                  role: 'user',
+                  content: [{ type: 'input_text', text: initialMsg }],
+                },
+              }));
+              dcRef.current.send(JSON.stringify({ type: 'response.create' }));
+              debugAdd(`initial message sent: "${initialMsg.slice(0, 40)}..."`);
+            }, 150);
+          } catch (err) {
+            debugAdd(`initial message FAILED: ${err}`);
+          }
         }
       };
       dc.onmessage = (e) => {
@@ -935,65 +988,51 @@ export default function VoiceApp({ tenant, user }: Props) {
         </header>
       )}
 
-      {/* Translator-Status: persistenter dünner Streifen direkt unter Banner.
-          Bleibt auch sichtbar wenn der User durch den Dialog scrollt - so dass
-          er IMMER weiß, dass der Modus aktiv ist. */}
-      {translatorActive && translatorTarget && (
-        <div
-          className="flex-shrink-0 px-4 py-1.5 flex items-center justify-center gap-2 border-b border-indigo-100"
-          style={{ background: 'linear-gradient(90deg, #EEF2FF 0%, #FAF5FF 50%, #FDF2F8 100%)' }}
-        >
-          <span className="flex h-2 w-2 relative">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500" />
-          </span>
-          <span className="text-[11px] font-semibold text-indigo-700 tracking-wide">
-            {t('translator.statusActive', {
-              source: SUPPORTED_LOCALES.find(l => l.code === locale)?.nativeLabel || locale,
-              target: translatorTarget.nativeLabel || translatorTarget.label,
-            })}
-          </span>
-        </div>
-      )}
+      {/* Hinweis: der frühere Sticky-Status-Streifen wurde entfernt - er war
+          redundant zum Translator-Banner oben (zeigte dieselbe Info zweimal).
+          Der Banner und der getönte App-Hintergrund signalisieren den Modus
+          jetzt klar genug. */}
 
-      {/* Mode Indicator + Tools-Strip - nur im Normal-Modus */}
+      {/* Tools-Strip im Normal-Modus.
+          Standard-Modus-Anzeige wurde entfernt - der User sieht beim
+          Mode-Wechsel sowieso einen ganz anderen Bildschirm (Translator-UI),
+          deshalb braucht der Normal-Modus keine "ich bin Standard"-Anzeige.
+          Tools sind klickbar - ein Klick simuliert "${name}, [Tool-Label]"
+          als User-Aussage und startet dadurch einen Voice-Dialog mit dem Tool. */}
       {!translatorActive && (
-        <>
-          <div className="flex-shrink-0 px-4 py-2 bg-white border-b border-stone-100 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="w-1.5 h-1.5 rounded-full" style={{ background: '#10B981' }} />
-              <span className="text-[11px] text-stone-600">
-                <span className="font-semibold">{t('app.status.standardMode')}</span>
-                <span className="text-stone-400"> · {t('app.status.standardModeDesc')}</span>
-              </span>
-            </div>
+        <div className="flex-shrink-0 px-4 py-2.5 bg-white border-b border-stone-100">
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <Wrench size={11} className="text-stone-400" />
+            <span className="text-[10px] uppercase tracking-wider text-stone-500 font-semibold">
+              {tenant.tools.length} {t('app.tools.available')}
+            </span>
           </div>
-
-          <div className="flex-shrink-0 px-4 py-2.5 bg-white border-b border-stone-100">
-            <div className="flex items-center gap-1.5 mb-1.5">
-              <Wrench size={11} className="text-stone-400" />
-              <span className="text-[10px] uppercase tracking-wider text-stone-500 font-semibold">
-                {tenant.tools.length} {t('app.tools.available')}
-              </span>
-            </div>
-            <div className="flex gap-1.5 overflow-x-auto pb-1">
-              {tenant.tools.map(tool => (
-                <div
-                  key={tool.id}
-                  title={tool.description}
-                  className="px-2.5 py-1 rounded-full text-[10px] whitespace-nowrap shrink-0 font-medium border"
-                  style={{
-                    background: secondary,
-                    color: primary,
-                    borderColor: withAlpha(primary, 0.15),
-                  }}
-                >
-                  {tool.label}
-                </div>
-              ))}
-            </div>
+          <div className="flex gap-1.5 overflow-x-auto pb-1">
+            {tenant.tools.map(tool => (
+              <button
+                key={tool.id}
+                title={tool.description}
+                onClick={() => {
+                  if (voiceState !== 'idle' && voiceState !== 'error') return;
+                  // Trigger-Phrase: "[AgentName], [Tool-Label]"
+                  // Das Modell wird darauf wie auf eine echte Sprach-Aussage
+                  // reagieren und das passende Tool aufrufen.
+                  const trigger = `${settings.agentName}, ${tool.label}`;
+                  startRealtimeSession({ initialUserMessage: trigger });
+                }}
+                disabled={voiceState !== 'idle' && voiceState !== 'error'}
+                className="px-2.5 py-1 rounded-full text-[10px] whitespace-nowrap shrink-0 font-medium border transition hover:scale-105 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{
+                  background: secondary,
+                  color: primary,
+                  borderColor: withAlpha(primary, 0.15),
+                }}
+              >
+                {tool.label}
+              </button>
+            ))}
           </div>
-        </>
+        </div>
       )}
 
       {/* Dialog History */}
@@ -1295,29 +1334,27 @@ function renderTranslatorTurns(turns: Turn[], sourceLocale: string, target: any,
 }
 
 function TranslatorPair({ pair, sourceLocale, target, t }: any) {
-  const sourceLang = SUPPORTED_LOCALES.find((l: any) => l.code === sourceLocale);
   const time = pair.user
     ? new Date(pair.user.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
     : pair.assistant
       ? new Date(pair.assistant.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
       : '';
 
-  // EINE zusammenhängende Karte mit beiden Sprachen drin.
-  // Bewusst NICHT dialogisch (keine User/Assistant-Bubbles), sondern als
-  // Übersetzungs-Paar präsentiert: Original oben, Übersetzung unten,
-  // getrennt durch eine dünne Linie. Beides ist gleichwertig - keine Seite
-  // ist "der User" oder "die Antwort", beides sind Aussagen die übersetzt
-  // werden.
+  // EINE zusammenhängende Karte mit zwei Sektionen.
+  // Bewusste UX-Entscheidung: oben ist IMMER die Eingabe (was reingekommen ist),
+  // unten IMMER die Ausgabe (Übersetzung). Wir zeigen NICHT die jeweilige
+  // Sprache - das wäre fehleranfällig (welche Sprache war's? schwer
+  // zuverlässig zu erkennen). "Eingabe" und "Ausgabe" sind neutral und immer
+  // korrekt, egal welche Richtung gerade übersetzt wurde.
 
   return (
     <div className="rounded-2xl bg-white border border-stone-200 shadow-sm overflow-hidden">
-      {/* Original-Sektion */}
+      {/* Eingabe-Sektion */}
       {pair.user && (
         <div className="px-4 py-3">
           <div className="flex items-center gap-1.5 mb-1.5">
-            <span className="text-sm">{sourceLang?.flag || '🌐'}</span>
             <span className="text-[10px] uppercase tracking-wider text-stone-400 font-semibold">
-              {sourceLang?.nativeLabel || t('translator.detected')}
+              {t('translator.input')}
             </span>
             {time && <span className="text-[10px] font-mono text-stone-300 ml-auto">{time}</span>}
           </div>
@@ -1325,21 +1362,20 @@ function TranslatorPair({ pair, sourceLocale, target, t }: any) {
         </div>
       )}
 
-      {/* Trenn-Linie zwischen Original und Übersetzung */}
+      {/* Trenn-Linie zwischen Eingabe und Ausgabe */}
       {pair.user && pair.assistant && (
         <div className="border-t border-stone-100" />
       )}
 
-      {/* Übersetzungs-Sektion */}
+      {/* Ausgabe-Sektion */}
       {pair.assistant && (
         <div
           className="px-4 py-3"
           style={{ background: 'linear-gradient(135deg, #FAFAFC 0%, #FDF8FB 100%)' }}
         >
           <div className="flex items-center gap-1.5 mb-1.5">
-            <span className="text-sm">{target?.flag || '🌐'}</span>
             <span className="text-[10px] uppercase tracking-wider text-indigo-600 font-semibold">
-              {target?.nativeLabel || target?.label || t('translator.translation')}
+              {t('translator.output')}
             </span>
           </div>
           <p className="text-[15px] text-stone-800 leading-snug">{pair.assistant.text || '…'}</p>
@@ -1398,7 +1434,16 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, setti
         </header>
 
         <div className="p-5 space-y-5">
-          {/* Sprach-Wahl ganz oben - sie beeinflusst alle anderen Texte und Stimm-Proben */}
+          {/* Agent-Name ganz oben - persönlichste Einstellung, beeinflusst
+              Trigger-Wörter, Stimmprobe und alle UI-Texte mit Namens-Bezug. */}
+          <AgentNameSetting
+            value={settings.agentName}
+            onChange={(name: string) => updateSettings({ agentName: name })}
+            primary={primary}
+            t={t}
+          />
+
+          {/* Sprach-Wahl - beeinflusst alle Texte und Stimm-Proben */}
           <LanguagePickerSetting
             value={locale}
             onChange={setLocale}
@@ -1430,6 +1475,7 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, setti
               onSelect={(id: string | null) => updateSettings({ voiceId: id })}
               primary={primary}
               locale={locale}
+              agentName={settings.agentName}
               t={t}
             />
           )}
@@ -1451,7 +1497,7 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, setti
                 onPreview={(id: string | null) => {
                   speech.primeForUserInteraction();
                   setTimeout(() => {
-                    speech.speak(VOICE_PREVIEW_TEXTS[locale as Locale] || VOICE_PREVIEW_TEXTS.en, {
+                    speech.speak(buildVoicePreviewText(locale as Locale, settings.agentName), {
                       rate: 1.0,
                     });
                   }, 100);
@@ -1499,22 +1545,7 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, setti
             </div>
           </section>
 
-          <section>
-            <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
-              <Wrench size={12} /> {t('settings.tools')} ({tenant.tools.length})
-            </h4>
-            <div className="space-y-1.5">
-              {tenant.tools.map((tool: any) => (
-                <div key={tool.id} className="rounded-xl border border-stone-200 bg-stone-50 p-2.5">
-                  <div className="flex items-center justify-between mb-0.5">
-                    <p className="text-xs font-semibold text-stone-800">{tool.label}</p>
-                    <span className="text-[9px] uppercase tracking-wider font-mono text-stone-400">{tool.type}</span>
-                  </div>
-                  <p className="text-[11px] text-stone-500 leading-relaxed">{tool.description}</p>
-                </div>
-              ))}
-            </div>
-          </section>
+          <ToolsListSetting tools={tenant.tools} primary={primary} t={t} />
 
           <section>
             <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
@@ -1541,7 +1572,7 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, setti
 
 /* ─────────── OpenAI Voice Picker (für echte User) ─────────── */
 
-function OpenAIVoicePicker({ tenant, selectedVoiceId, onSelect, primary, locale, t }: any) {
+function OpenAIVoicePicker({ tenant, selectedVoiceId, onSelect, primary, locale, agentName, t }: any) {
   const tenantDefault = tenant.agent.voice_id;
 
   // Welche Stimme lädt gerade eine Probe (für Loading-Spinner)
@@ -1586,7 +1617,7 @@ function OpenAIVoicePicker({ tenant, selectedVoiceId, onSelect, primary, locale,
 
     try {
       // Locale-aware Probe-Text damit die Stimme in der App-Sprache klingt
-      const previewText = VOICE_PREVIEW_TEXTS[locale as Locale] || VOICE_PREVIEW_TEXTS.en;
+      const previewText = buildVoicePreviewText(locale as Locale, agentName || 'Anni');
       const res = await fetch('/api/tts-preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1638,92 +1669,70 @@ function OpenAIVoicePicker({ tenant, selectedVoiceId, onSelect, primary, locale,
 
   const handleSelect = (id: string | null) => {
     onSelect(id);
-    // Bei Auswahl gleich Probe abspielen - außer bei Default
-    // (für Default nehmen wir die Tenant-Voice-ID)
-    const voiceToPreview = id || tenantDefault;
-    if (voiceToPreview) {
-      playPreview(voiceToPreview);
-    }
+    // Beim Wechsel über das Dropdown gibt es bewusst KEINE automatische Probe.
+    // Der User klickt explizit auf "Probe hören" - das war der Wunsch
+    // (Option B in der Designdiskussion).
   };
+
+  // Welche Voice-ID ist aktuell effektiv aktiv (für Probe-Button)
+  const effectiveVoiceId = selectedVoiceId || tenantDefault;
+  const isPreviewLoading = previewLoadingFor === effectiveVoiceId;
+
+  // Optionen-Liste: Tenant-Default zuerst, dann alle Stimmen
+  const options = [
+    { id: null, label: t('settings.voice.tenantDefault', { tenant: tenant.name }), description: OPENAI_VOICES.find((v: any) => v.id === tenantDefault)?.label || tenantDefault },
+    ...OPENAI_VOICES.map((v: any) => ({ id: v.id, label: v.label, description: v.description })),
+  ];
 
   return (
     <section>
       <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
         <Volume2 size={12} /> {t('settings.voice.title')}
       </h4>
-      <p className="text-[11px] text-stone-500 mb-3">
+      <p className="text-[11px] text-stone-500 mb-2">
         {t('settings.voice.desc')}
       </p>
-      <div className="space-y-1.5">
-        {/* Tenant-Default Option */}
+      <div className="flex gap-2">
+        <div className="relative flex-1">
+          <select
+            value={selectedVoiceId ?? '__default__'}
+            onChange={(e) => {
+              const v = e.target.value;
+              handleSelect(v === '__default__' ? null : v);
+            }}
+            className="w-full appearance-none p-3 pr-10 rounded-2xl border border-stone-200 bg-white text-sm text-stone-800 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-1"
+            style={{ borderColor: '#E7E5E4', '--tw-ring-color': primary } as any}
+          >
+            {options.map(opt => (
+              <option key={opt.id ?? '__default__'} value={opt.id ?? '__default__'}>
+                {opt.label} {opt.description ? `· ${opt.description}` : ''}
+              </option>
+            ))}
+          </select>
+          <div className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-stone-400">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </div>
+        </div>
         <button
-          onClick={() => handleSelect(null)}
-          disabled={previewLoadingFor !== null}
-          className="w-full p-3 rounded-2xl border-2 transition flex items-center gap-3 text-left disabled:opacity-60"
+          onClick={() => effectiveVoiceId && playPreview(effectiveVoiceId)}
+          disabled={!effectiveVoiceId || isPreviewLoading}
+          title={t('settings.voice.preview')}
+          className="px-3 rounded-2xl border-2 flex items-center gap-1.5 text-xs font-semibold transition disabled:opacity-50"
           style={{
-            borderColor: selectedVoiceId === null ? primary : '#E7E5E4',
-            background: selectedVoiceId === null ? `${primary}10` : '#FAFAF9',
+            borderColor: primary,
+            background: `${primary}10`,
+            color: primary,
           }}
         >
-          <div
-            className="w-9 h-9 rounded-2xl flex items-center justify-center shrink-0"
-            style={{ background: selectedVoiceId === null ? primary : '#E7E5E4' }}
-          >
-            {previewLoadingFor === tenantDefault && selectedVoiceId === null ? (
-              <Loader2 size={14} color="#FFFFFF" className="animate-spin" />
-            ) : (
-              <Volume2 size={14} color={selectedVoiceId === null ? '#FFFFFF' : '#78716C'} />
-            )}
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-semibold text-stone-800">{t('settings.voice.tenantDefault', { tenant: tenant.name })}</p>
-            <p className="text-[11px] text-stone-500">
-              {OPENAI_VOICES.find((v: any) => v.id === tenantDefault)?.label || tenantDefault}
-            </p>
-          </div>
-          {selectedVoiceId === null && (
-            <span className="text-[10px] font-semibold" style={{ color: primary }}>{t('settings.voice.active')}</span>
+          {isPreviewLoading ? (
+            <Loader2 size={14} className="animate-spin" />
+          ) : (
+            <Volume2 size={14} />
           )}
+          <span className="hidden sm:inline">{t('settings.voice.preview')}</span>
         </button>
-
-        {/* Alle OpenAI-Stimmen */}
-        {OPENAI_VOICES.map((voice: any) => {
-          const isSelected = voice.id === selectedVoiceId;
-          const isLoading = previewLoadingFor === voice.id;
-          return (
-            <button
-              key={voice.id}
-              onClick={() => handleSelect(voice.id)}
-              disabled={previewLoadingFor !== null && !isLoading}
-              className="w-full p-3 rounded-2xl border-2 transition flex items-center gap-3 text-left disabled:opacity-60"
-              style={{
-                borderColor: isSelected ? primary : '#E7E5E4',
-                background: isSelected ? `${primary}10` : '#FAFAF9',
-              }}
-            >
-              <div
-                className="w-9 h-9 rounded-2xl flex items-center justify-center shrink-0 text-[11px] font-semibold"
-                style={{
-                  background: isSelected ? primary : '#E7E5E4',
-                  color: isSelected ? '#FFFFFF' : '#78716C',
-                }}
-              >
-                {isLoading ? (
-                  <Loader2 size={14} className="animate-spin" />
-                ) : (
-                  voice.label.slice(0, 2)
-                )}
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-semibold text-stone-800">{voice.label}</p>
-                <p className="text-[11px] text-stone-500">{voice.description}</p>
-              </div>
-              {isSelected && (
-                <span className="text-[10px] font-semibold" style={{ color: primary }}>{t('settings.voice.active')}</span>
-              )}
-            </button>
-          );
-        })}
       </div>
     </section>
   );
@@ -1733,36 +1742,154 @@ function OpenAIVoicePicker({ tenant, selectedVoiceId, onSelect, primary, locale,
 
 /* ─────────── App-Sprache (i18n) ─────────── */
 
+/* ─────────── Tools-Liste in Settings (Aufklapp-Variante) ─────────── */
+
+function ToolsListSetting({ tools, primary, t }: any) {
+  // Welche Tool-IDs sind gerade aufgeklappt
+  const [expandedIds, setExpandedIds] = React.useState<Set<string>>(new Set());
+
+  const toggle = (id: string) => {
+    setExpandedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  return (
+    <section>
+      <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
+        <Wrench size={12} /> {t('settings.tools')} ({tools.length})
+      </h4>
+      <div className="rounded-2xl border border-stone-200 bg-stone-50 overflow-hidden divide-y divide-stone-200">
+        {tools.map((tool: any) => {
+          const isExpanded = expandedIds.has(tool.id);
+          return (
+            <div key={tool.id}>
+              <button
+                onClick={() => toggle(tool.id)}
+                className="w-full px-3 py-2.5 flex items-center justify-between gap-2 hover:bg-stone-100 transition text-left"
+              >
+                <span className="text-xs font-semibold text-stone-800 truncate flex-1">{tool.label}</span>
+                <span className="text-[9px] uppercase tracking-wider font-mono text-stone-400 shrink-0">{tool.type}</span>
+                <svg
+                  width="12" height="12" viewBox="0 0 12 12" fill="none"
+                  className="shrink-0 text-stone-400 transition-transform"
+                  style={{ transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }}
+                >
+                  <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+              {isExpanded && (
+                <div className="px-3 pb-2.5 -mt-0.5">
+                  <p className="text-[11px] text-stone-500 leading-relaxed">{tool.description}</p>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+/* ─────────── Agent-Name (persönlicher Name des Voice-Agents) ─────────── */
+
+function AgentNameSetting({ value, onChange, primary, t }: any) {
+  // Lokaler State für tippen, damit jedes Zeichen nicht sofort propagiert
+  // (sonst würde jeder Tastendruck einen i18n-Re-Render auslösen).
+  const [draft, setDraft] = React.useState<string>(value);
+  React.useEffect(() => { setDraft(value); }, [value]);
+
+  // Validierung: nur Buchstaben/Leerzeichen/Apostrophe/Bindestriche, max 30
+  const isValid = /^[\p{L}\s'-]{1,30}$/u.test(draft.trim());
+  const isDirty = draft.trim() !== value.trim();
+
+  const commit = () => {
+    if (isValid && isDirty) {
+      onChange(draft.trim());
+    } else if (!isValid) {
+      // Bei Ungültigem auf Default zurück
+      setDraft(value);
+    }
+  };
+
+  return (
+    <section>
+      <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
+        <Sparkles size={12} /> {t('settings.agentName.title')}
+      </h4>
+      <p className="text-[11px] text-stone-500 mb-2 leading-relaxed">
+        {t('settings.agentName.desc')}
+      </p>
+      <div className="relative">
+        <input
+          type="text"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+          }}
+          maxLength={30}
+          placeholder="Anni"
+          className="w-full p-3 rounded-2xl border bg-white text-sm text-stone-800 focus:outline-none focus:ring-2 focus:ring-offset-1"
+          style={{
+            borderColor: isDirty && !isValid ? '#FCA5A5' : '#E7E5E4',
+            ['--tw-ring-color' as any]: primary,
+          }}
+        />
+        {isDirty && (
+          <button
+            onClick={commit}
+            disabled={!isValid}
+            className="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 rounded-lg text-[10px] font-semibold transition disabled:opacity-50"
+            style={{ background: primary, color: '#FFFFFF' }}
+          >
+            {t('common.save')}
+          </button>
+        )}
+      </div>
+      {isDirty && !isValid && (
+        <p className="text-[10px] text-rose-600 mt-1.5">{t('settings.agentName.invalid')}</p>
+      )}
+      <p className="text-[10px] text-stone-400 mt-1.5 leading-relaxed">
+        {t('settings.agentName.hint', { name: draft.trim() || 'Anni' })}
+      </p>
+    </section>
+  );
+}
+
+/* ─────────── App-Sprache (i18n) ─────────── */
+
 function LanguagePickerSetting({ value, onChange, primary, t }: any) {
   return (
     <section>
       <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
         <Globe size={12} /> {t('settings.appLanguage')}
       </h4>
-      <p className="text-[11px] text-stone-500 mb-3 leading-relaxed">
+      <p className="text-[11px] text-stone-500 mb-2 leading-relaxed">
         {t('settings.appLanguageDesc')}
       </p>
-      <div className="grid grid-cols-2 gap-1.5">
-        {SUPPORTED_LOCALES.map((loc: any) => {
-          const isSelected = loc.code === value;
-          return (
-            <button
-              key={loc.code}
-              onClick={() => onChange(loc.code)}
-              className="flex items-center gap-2 p-2.5 rounded-2xl border-2 transition text-left"
-              style={{
-                borderColor: isSelected ? primary : '#E7E5E4',
-                background: isSelected ? `${primary}10` : '#FAFAF9',
-              }}
-            >
-              <span className="text-base">{loc.flag}</span>
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-semibold text-stone-800 truncate">{loc.nativeLabel}</p>
-              </div>
-              {isSelected && <Check size={14} style={{ color: primary }} />}
-            </button>
-          );
-        })}
+      <div className="relative">
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="w-full appearance-none p-3 pr-10 rounded-2xl border border-stone-200 bg-white text-sm text-stone-800 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-1"
+          style={{ borderColor: '#E7E5E4', '--tw-ring-color': primary } as any}
+        >
+          {SUPPORTED_LOCALES.map((loc: any) => (
+            <option key={loc.code} value={loc.code}>
+              {loc.flag}  {loc.nativeLabel}
+            </option>
+          ))}
+        </select>
+        <div className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-stone-400">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </div>
       </div>
     </section>
   );

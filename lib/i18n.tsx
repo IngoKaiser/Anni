@@ -85,7 +85,23 @@ export function detectInitialLocale(): Locale {
 
 /**
  * Voice-Sample-Texte für die Stimm-Probe in den Settings.
- * Pro App-Sprache ein passender Beispielsatz.
+ * Pro App-Sprache ein passender Beispielsatz mit dynamischem Agent-Namen.
+ */
+export function buildVoicePreviewText(locale: Locale, agentName: string): string {
+  const templates: Record<Locale, (n: string) => string> = {
+    de: (n) => `Hallo, ich bin ${n}. So klinge ich.`,
+    en: (n) => `Hello, I'm ${n}. This is how I sound.`,
+    it: (n) => `Ciao, sono ${n}. Ecco come suono.`,
+    fr: (n) => `Bonjour, je suis ${n}. Voilà ma voix.`,
+    es: (n) => `Hola, soy ${n}. Así suena mi voz.`,
+  };
+  const builder = templates[locale] || templates.en;
+  return builder(agentName);
+}
+
+/**
+ * @deprecated - nutze buildVoicePreviewText(locale, agentName) stattdessen.
+ * Bleibt nur als Fallback für Code der noch nicht migriert ist.
  */
 export const VOICE_PREVIEW_TEXTS: Record<Locale, string> = {
   de: 'Hallo, ich bin Anni. So klinge ich.',
@@ -133,7 +149,7 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'login.error.notConfigured': 'Email-Login ist auf diesem System nicht konfiguriert.',
     'login.error.email': 'Die Email konnte nicht versendet werden. Häufige Ursachen: Resend-API-Key ist ungültig, oder die Absender-Domain ist nicht in Resend verifiziert. Bitte erneut versuchen oder den Administrator kontaktieren.',
     'login.error.verification': 'Der Anmelde-Link ist abgelaufen oder ungültig. Bitte einen neuen Link anfordern.',
-    'login.error.accessDenied': 'Diese Email-Domain ist nicht für Anni freigeschaltet. Bitte den Administrator kontaktieren.',
+    'login.error.accessDenied': 'Diese Email-Domain ist nicht für {name} freigeschaltet. Bitte den Administrator kontaktieren.',
     'login.error.configuration': 'Der Server ist nicht korrekt konfiguriert. Bitte den Administrator kontaktieren.',
     'login.error.callback': 'Beim Verarbeiten des Anmelde-Links ist ein Fehler aufgetreten. Bitte erneut versuchen.',
     'login.error.unknown': 'Anmeldung fehlgeschlagen. Bitte erneut versuchen.',
@@ -152,6 +168,11 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'app.tools.available': 'Tools verfügbar',
     'app.demo_badge': 'DEMO',
     'app.error': 'Fehler',
+    'settings.agentName.title': 'Name des Assistenten',
+    'settings.agentName.desc': 'Wie soll dein persönlicher Voice-Assistent heißen? Dieser Name wird als Aktivierungswort genutzt — nur "{name}, ..." löst Aktionen aus.',
+    'settings.agentName.hint': 'Sag z.B.: "{name}, Übersetzung starten" oder "{name}, Vitalwerte erfassen".',
+    'settings.agentName.invalid': 'Nur Buchstaben, Leerzeichen, Bindestriche. Max. 30 Zeichen.',
+    'common.save': 'Speichern',
     'app.status.standardMode': 'Standard-Modus',
     'app.status.standardModeDesc': 'KI wählt automatisch passendes Tool',
 
@@ -192,14 +213,15 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
 
     // Settings - Sprache
     'settings.appLanguage': 'App-Sprache',
-    'settings.appLanguageDesc': 'Sprache der Oberfläche und Sprachausgabe von Anni',
-    'settings.appLanguageHint': 'Wirkt sofort. Anni spricht ab der nächsten Session in der gewählten Sprache.',
+    'settings.appLanguageDesc': 'Sprache der Oberfläche und Sprachausgabe von {name}',
+    'settings.appLanguageHint': 'Wirkt sofort. {name} spricht ab der nächsten Session in der gewählten Sprache.',
 
     // Settings - Stimme (echte User)
-    'settings.voice.title': 'Stimme von Anni',
+    'settings.voice.title': 'Stimme von {name}',
     'settings.voice.desc': 'Tippe eine Stimme an, um sie sofort zu hören. Auswahl wirkt ab der nächsten Session.',
     'settings.voice.tenantDefault': 'Standard für {tenant}',
     'settings.voice.active': 'aktiv',
+    'settings.voice.preview': 'Probe hören',
 
     // Settings - Demo-Stimme
     'settings.demoVoice.title': 'Stimme der Sprachausgabe',
@@ -207,7 +229,7 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
 
     // Settings - VAD
     'settings.vad.title': 'Empfindlichkeit Spracherkennung',
-    'settings.vad.desc': 'Wie empfindlich Anni auf Geräusche reagiert. Bei häufigen Falschauslösungen durch Hintergrundgeräusche auf "Niedrig" stellen.',
+    'settings.vad.desc': 'Wie empfindlich {name} auf Geräusche reagiert. Bei häufigen Falschauslösungen durch Hintergrundgeräusche auf "Niedrig" stellen.',
     'settings.vad.high.label': 'Hoch',
     'settings.vad.high.desc': 'Reagiert schnell, hört auch leise Stimmen',
     'settings.vad.high.hint': 'Bei ruhiger Umgebung',
@@ -221,7 +243,7 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
 
     // Settings - Lausch-Timeout
     'settings.timeout.title': 'Lausch-Zeit nach Antwort',
-    'settings.timeout.desc': 'Wie lange Anni nach einer Antwort weiter zuhört, bevor die Session endet. Du kannst in dieser Zeit einfach weiter reden — Anni antwortet im Dialog.',
+    'settings.timeout.desc': 'Wie lange {name} nach einer Antwort weiter zuhört, bevor die Session endet. Du kannst in dieser Zeit einfach weiter reden — {name} antwortet im Dialog.',
     'settings.timeout.current': 'Aktuell',
     'settings.timeout.seconds': 'Sek.',
     'settings.timeout.costHint': 'Hinweis: längere Lausch-Zeiten erhöhen die OpenAI-Kosten leicht.',
@@ -230,14 +252,16 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'translator.banner': 'Übersetzungsmodus',
     'translator.activeLabel': 'AKTIV',
     'translator.statusActive': 'Übersetzung aktiv: {source} ↔ {target}',
-    'translator.bannerSub': 'Anni dolmetscht zwischen {source} und {target}',
+    'translator.bannerSub': '{name} dolmetscht zwischen {source} und {target}',
     'translator.askLanguage': 'In welche Sprache soll übersetzt werden?',
     'translator.detecting': 'Sprache wird erkannt…',
     'translator.connecting': 'Übersetzungsmodus wird gestartet…',
     'translator.placeholder': 'Sprich los — ich übersetze hin und her zwischen {source} und {target}.',
-    'translator.endHint': 'Sage "Anni Übersetzung beenden" um zu beenden.',
+    'translator.endHint': 'Sage "{name} Übersetzung beenden" um zu beenden.',
     'translator.exitButton': 'Übersetzung beenden',
     'translator.detected': 'Original',
+    'translator.input': 'Eingabe',
+    'translator.output': 'Ausgabe',
     'translator.translation': 'Übersetzung',
 
     // Generic
@@ -267,7 +291,7 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'login.error.notConfigured': 'Email login is not configured on this system.',
     'login.error.email': 'Could not send email. Common causes: invalid Resend API key, or sender domain not verified in Resend. Please try again or contact your administrator.',
     'login.error.verification': 'The sign-in link has expired or is invalid. Please request a new link.',
-    'login.error.accessDenied': 'This email domain is not enabled for Anni. Please contact your administrator.',
+    'login.error.accessDenied': 'This email domain is not enabled for {name}. Please contact your administrator.',
     'login.error.configuration': 'Server is not correctly configured. Please contact your administrator.',
     'login.error.callback': 'Error processing the sign-in link. Please try again.',
     'login.error.unknown': 'Sign in failed. Please try again.',
@@ -284,6 +308,11 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'app.tools.available': 'tools available',
     'app.demo_badge': 'DEMO',
     'app.error': 'Error',
+    'settings.agentName.title': 'Assistant name',
+    'settings.agentName.desc': 'What should your personal voice assistant be called? This name is used as activation word — only "{name}, ..." triggers actions.',
+    'settings.agentName.hint': 'Say e.g.: "{name}, start translation" or "{name}, record vitals".',
+    'settings.agentName.invalid': 'Only letters, spaces, hyphens. Max. 30 characters.',
+    'common.save': 'Save',
     'app.status.standardMode': 'Standard mode',
     'app.status.standardModeDesc': 'AI picks the right tool automatically',
 
@@ -319,19 +348,20 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.emailDomains': 'Email domains',
 
     'settings.appLanguage': 'App language',
-    'settings.appLanguageDesc': 'Language of the interface and Anni\'s voice',
-    'settings.appLanguageHint': 'Takes effect immediately. Anni will speak the chosen language from the next session.',
+    'settings.appLanguageDesc': 'Language of the interface and {name}\'s voice',
+    'settings.appLanguageHint': 'Takes effect immediately. {name} will speak the chosen language from the next session.',
 
-    'settings.voice.title': 'Anni\'s voice',
+    'settings.voice.title': '{name}\'s voice',
     'settings.voice.desc': 'Tap a voice to hear it. Selection takes effect from the next session.',
     'settings.voice.tenantDefault': 'Standard for {tenant}',
     'settings.voice.active': 'active',
+    'settings.voice.preview': 'Preview',
 
     'settings.demoVoice.title': 'Voice for speech output',
     'settings.demoVoice.desc': 'Choose a voice. Tap an option to hear it immediately.',
 
     'settings.vad.title': 'Voice detection sensitivity',
-    'settings.vad.desc': 'How sensitively Anni reacts to sounds. If background noise causes false triggers, set to "Low".',
+    'settings.vad.desc': 'How sensitively {name} reacts to sounds. If background noise causes false triggers, set to "Low".',
     'settings.vad.high.label': 'High',
     'settings.vad.high.desc': 'Reacts quickly, hears even quiet voices',
     'settings.vad.high.hint': 'For quiet environments',
@@ -344,7 +374,7 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.vad.hint': 'Note: Takes effect from the next session.',
 
     'settings.timeout.title': 'Listen time after response',
-    'settings.timeout.desc': 'How long Anni keeps listening after a response before the session ends. You can simply keep speaking — Anni continues the dialog.',
+    'settings.timeout.desc': 'How long {name} keeps listening after a response before the session ends. You can simply keep speaking — {name} continues the dialog.',
     'settings.timeout.current': 'Current',
     'settings.timeout.seconds': 'sec.',
     'settings.timeout.costHint': 'Note: longer listen times slightly increase OpenAI costs.',
@@ -352,14 +382,16 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'translator.banner': 'Translation mode',
     'translator.activeLabel': 'ACTIVE',
     'translator.statusActive': 'Translation active: {source} ↔ {target}',
-    'translator.bannerSub': 'Anni interprets between {source} and {target}',
+    'translator.bannerSub': '{name} interprets between {source} and {target}',
     'translator.askLanguage': 'Which language should I translate to?',
     'translator.detecting': 'Detecting language…',
     'translator.connecting': 'Starting translation mode…',
     'translator.placeholder': 'Go ahead — I\'ll translate back and forth between {source} and {target}.',
-    'translator.endHint': 'Say "Anni stop translation" to end.',
+    'translator.endHint': 'Say "{name} stop translation" to end.',
     'translator.exitButton': 'End translation',
     'translator.detected': 'Original',
+    'translator.input': 'Input',
+    'translator.output': 'Output',
     'translator.translation': 'Translation',
 
     'common.cancel': 'Cancel',
@@ -405,6 +437,11 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'app.tools.available': 'strumenti disponibili',
     'app.demo_badge': 'DEMO',
     'app.error': 'Errore',
+    'settings.agentName.title': 'Nome assistente',
+    'settings.agentName.desc': 'Come si dovrebbe chiamare il tuo assistente vocale personale? Questo nome è la parola di attivazione — solo "{name}, ..." attiva azioni.',
+    'settings.agentName.hint': 'Di\' ad esempio: "{name}, avvia traduzione" o "{name}, registra parametri vitali".',
+    'settings.agentName.invalid': 'Solo lettere, spazi, trattini. Max. 30 caratteri.',
+    'common.save': 'Salva',
     'app.status.standardMode': 'Modalità standard',
     'app.status.standardModeDesc': 'L\'IA sceglie automaticamente lo strumento giusto',
 
@@ -440,19 +477,20 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.emailDomains': 'Domini email',
 
     'settings.appLanguage': 'Lingua dell\'app',
-    'settings.appLanguageDesc': 'Lingua dell\'interfaccia e della voce di Anni',
-    'settings.appLanguageHint': 'Effetto immediato. Anni parlerà nella lingua scelta dalla prossima sessione.',
+    'settings.appLanguageDesc': 'Lingua dell\'interfaccia e della voce di {name}',
+    'settings.appLanguageHint': 'Effetto immediato. {name} parlerà nella lingua scelta dalla prossima sessione.',
 
-    'settings.voice.title': 'Voce di Anni',
+    'settings.voice.title': 'Voce di {name}',
     'settings.voice.desc': 'Tocca una voce per ascoltarla. La selezione ha effetto dalla prossima sessione.',
     'settings.voice.tenantDefault': 'Predefinita per {tenant}',
     'settings.voice.active': 'attiva',
+    'settings.voice.preview': 'Anteprima',
 
     'settings.demoVoice.title': 'Voce per l\'output vocale',
     'settings.demoVoice.desc': 'Scegli una voce. Tocca un\'opzione per ascoltarla.',
 
     'settings.vad.title': 'Sensibilità riconoscimento vocale',
-    'settings.vad.desc': 'Quanto sensibilmente Anni reagisce ai suoni. In caso di falsi positivi, imposta "Bassa".',
+    'settings.vad.desc': 'Quanto sensibilmente {name} reagisce ai suoni. In caso di falsi positivi, imposta "Bassa".',
     'settings.vad.high.label': 'Alta',
     'settings.vad.high.desc': 'Reagisce velocemente, sente anche voci basse',
     'settings.vad.high.hint': 'In ambienti silenziosi',
@@ -465,7 +503,7 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.vad.hint': 'Nota: ha effetto dalla prossima sessione.',
 
     'settings.timeout.title': 'Tempo di ascolto dopo risposta',
-    'settings.timeout.desc': 'Quanto a lungo Anni continua ad ascoltare dopo una risposta prima che la sessione termini.',
+    'settings.timeout.desc': 'Quanto a lungo {name} continua ad ascoltare dopo una risposta prima che la sessione termini.',
     'settings.timeout.current': 'Attuale',
     'settings.timeout.seconds': 'sec.',
     'settings.timeout.costHint': 'Nota: tempi più lunghi aumentano leggermente i costi OpenAI.',
@@ -473,14 +511,16 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'translator.banner': 'Modalità traduzione',
     'translator.activeLabel': 'ATTIVA',
     'translator.statusActive': 'Traduzione attiva: {source} ↔ {target}',
-    'translator.bannerSub': 'Anni traduce tra {source} e {target}',
+    'translator.bannerSub': '{name} traduce tra {source} e {target}',
     'translator.askLanguage': 'In quale lingua devo tradurre?',
     'translator.detecting': 'Rilevamento lingua…',
     'translator.connecting': 'Avvio modalità traduzione…',
     'translator.placeholder': 'Parla — traduco avanti e indietro tra {source} e {target}.',
-    'translator.endHint': 'Di\' "Anni stop traduzione" per terminare.',
+    'translator.endHint': 'Di\' "{name} stop traduzione" per terminare.',
     'translator.exitButton': 'Termina traduzione',
     'translator.detected': 'Originale',
+    'translator.input': 'Ingresso',
+    'translator.output': 'Uscita',
     'translator.translation': 'Traduzione',
 
     'common.cancel': 'Annulla',
@@ -526,6 +566,11 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'app.tools.available': 'outils disponibles',
     'app.demo_badge': 'DÉMO',
     'app.error': 'Erreur',
+    'settings.agentName.title': 'Nom de l\'assistant',
+    'settings.agentName.desc': 'Comment doit s\'appeler ton assistant vocal personnel ? Ce nom sert de mot d\'activation — seul "{name}, ..." déclenche des actions.',
+    'settings.agentName.hint': 'Dis par exemple : "{name}, démarrer traduction" ou "{name}, enregistrer signes vitaux".',
+    'settings.agentName.invalid': 'Uniquement lettres, espaces, tirets. Max. 30 caractères.',
+    'common.save': 'Enregistrer',
     'app.status.standardMode': 'Mode standard',
     'app.status.standardModeDesc': 'L\'IA choisit automatiquement le bon outil',
 
@@ -561,19 +606,20 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.emailDomains': 'Domaines email',
 
     'settings.appLanguage': 'Langue de l\'app',
-    'settings.appLanguageDesc': 'Langue de l\'interface et de la voix d\'Anni',
-    'settings.appLanguageHint': 'Effet immédiat. Anni parlera dans la langue choisie dès la prochaine session.',
+    'settings.appLanguageDesc': 'Langue de l\'interface et de la voix d\'{name}',
+    'settings.appLanguageHint': 'Effet immédiat. {name} parlera dans la langue choisie dès la prochaine session.',
 
-    'settings.voice.title': 'Voix d\'Anni',
+    'settings.voice.title': 'Voix d\'{name}',
     'settings.voice.desc': 'Touchez une voix pour l\'écouter. La sélection prend effet dès la prochaine session.',
     'settings.voice.tenantDefault': 'Par défaut pour {tenant}',
     'settings.voice.active': 'actif',
+    'settings.voice.preview': 'Aperçu',
 
     'settings.demoVoice.title': 'Voix de la sortie vocale',
     'settings.demoVoice.desc': 'Choisissez une voix. Touchez une option pour l\'écouter.',
 
     'settings.vad.title': 'Sensibilité reconnaissance vocale',
-    'settings.vad.desc': 'À quel point Anni réagit aux sons. En cas de faux déclenchements, réglez sur "Faible".',
+    'settings.vad.desc': 'À quel point {name} réagit aux sons. En cas de faux déclenchements, réglez sur "Faible".',
     'settings.vad.high.label': 'Haute',
     'settings.vad.high.desc': 'Réagit vite, entend les voix basses',
     'settings.vad.high.hint': 'En environnement calme',
@@ -586,7 +632,7 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.vad.hint': 'Note : effet à partir de la prochaine session.',
 
     'settings.timeout.title': 'Durée d\'écoute après réponse',
-    'settings.timeout.desc': 'Combien de temps Anni continue d\'écouter après une réponse avant que la session se termine.',
+    'settings.timeout.desc': 'Combien de temps {name} continue d\'écouter après une réponse avant que la session se termine.',
     'settings.timeout.current': 'Actuel',
     'settings.timeout.seconds': 'sec.',
     'settings.timeout.costHint': 'Note : des durées plus longues augmentent légèrement les coûts OpenAI.',
@@ -594,14 +640,16 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'translator.banner': 'Mode traduction',
     'translator.activeLabel': 'ACTIF',
     'translator.statusActive': 'Traduction active : {source} ↔ {target}',
-    'translator.bannerSub': 'Anni interprète entre {source} et {target}',
+    'translator.bannerSub': '{name} interprète entre {source} et {target}',
     'translator.askLanguage': 'Vers quelle langue dois-je traduire ?',
     'translator.detecting': 'Détection de la langue…',
     'translator.connecting': 'Démarrage du mode traduction…',
     'translator.placeholder': 'Parlez — je traduis entre {source} et {target}.',
-    'translator.endHint': 'Dites « Anni stop traduction » pour terminer.',
+    'translator.endHint': 'Dites « {name} stop traduction » pour terminer.',
     'translator.exitButton': 'Terminer la traduction',
     'translator.detected': 'Original',
+    'translator.input': 'Entrée',
+    'translator.output': 'Sortie',
     'translator.translation': 'Traduction',
 
     'common.cancel': 'Annuler',
@@ -647,6 +695,11 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'app.tools.available': 'herramientas disponibles',
     'app.demo_badge': 'DEMO',
     'app.error': 'Error',
+    'settings.agentName.title': 'Nombre del asistente',
+    'settings.agentName.desc': '¿Cómo se debería llamar tu asistente de voz personal? Este nombre se usa como palabra de activación — solo "{name}, ..." activa acciones.',
+    'settings.agentName.hint': 'Di por ejemplo: "{name}, iniciar traducción" o "{name}, registrar constantes vitales".',
+    'settings.agentName.invalid': 'Solo letras, espacios, guiones. Máx. 30 caracteres.',
+    'common.save': 'Guardar',
     'app.status.standardMode': 'Modo estándar',
     'app.status.standardModeDesc': 'La IA elige automáticamente la herramienta adecuada',
 
@@ -682,19 +735,20 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.emailDomains': 'Dominios email',
 
     'settings.appLanguage': 'Idioma de la app',
-    'settings.appLanguageDesc': 'Idioma de la interfaz y de la voz de Anni',
-    'settings.appLanguageHint': 'Efecto inmediato. Anni hablará en el idioma elegido a partir de la próxima sesión.',
+    'settings.appLanguageDesc': 'Idioma de la interfaz y de la voz de {name}',
+    'settings.appLanguageHint': 'Efecto inmediato. {name} hablará en el idioma elegido a partir de la próxima sesión.',
 
-    'settings.voice.title': 'Voz de Anni',
+    'settings.voice.title': 'Voz de {name}',
     'settings.voice.desc': 'Toca una voz para escucharla. La selección tiene efecto en la próxima sesión.',
     'settings.voice.tenantDefault': 'Predeterminada para {tenant}',
     'settings.voice.active': 'activa',
+    'settings.voice.preview': 'Vista previa',
 
     'settings.demoVoice.title': 'Voz para la salida de voz',
     'settings.demoVoice.desc': 'Elige una voz. Toca una opción para escucharla.',
 
     'settings.vad.title': 'Sensibilidad reconocimiento de voz',
-    'settings.vad.desc': 'Cuán sensiblemente Anni reacciona a sonidos. Si hay disparos falsos, ponlo en "Baja".',
+    'settings.vad.desc': 'Cuán sensiblemente {name} reacciona a sonidos. Si hay disparos falsos, ponlo en "Baja".',
     'settings.vad.high.label': 'Alta',
     'settings.vad.high.desc': 'Reacciona rápido, oye voces bajas',
     'settings.vad.high.hint': 'En entornos tranquilos',
@@ -707,7 +761,7 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.vad.hint': 'Nota: efecto desde la próxima sesión.',
 
     'settings.timeout.title': 'Tiempo de escucha tras respuesta',
-    'settings.timeout.desc': 'Cuánto tiempo Anni sigue escuchando tras una respuesta antes de que termine la sesión.',
+    'settings.timeout.desc': 'Cuánto tiempo {name} sigue escuchando tras una respuesta antes de que termine la sesión.',
     'settings.timeout.current': 'Actual',
     'settings.timeout.seconds': 'seg.',
     'settings.timeout.costHint': 'Nota: tiempos más largos aumentan ligeramente los costes de OpenAI.',
@@ -715,14 +769,16 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'translator.banner': 'Modo traducción',
     'translator.activeLabel': 'ACTIVO',
     'translator.statusActive': 'Traducción activa: {source} ↔ {target}',
-    'translator.bannerSub': 'Anni interpreta entre {source} y {target}',
+    'translator.bannerSub': '{name} interpreta entre {source} y {target}',
     'translator.askLanguage': '¿A qué idioma debo traducir?',
     'translator.detecting': 'Detectando idioma…',
     'translator.connecting': 'Iniciando modo traducción…',
     'translator.placeholder': 'Habla — traduzco entre {source} y {target}.',
-    'translator.endHint': 'Di "Anni stop traducción" para terminar.',
+    'translator.endHint': 'Di "{name} stop traducción" para terminar.',
     'translator.exitButton': 'Terminar traducción',
     'translator.detected': 'Original',
+    'translator.input': 'Entrada',
+    'translator.output': 'Salida',
     'translator.translation': 'Traducción',
 
     'common.cancel': 'Cancelar',
@@ -744,27 +800,30 @@ export function localeNativeLabel(code: Locale): string {
 interface I18nContextValue {
   locale: Locale;
   setLocale: (l: Locale) => void;
+  agentName: string;
+  setAgentName: (n: string) => void;
   t: (key: string, params?: Record<string, string | number>) => string;
 }
 
 const I18nContext = createContext<I18nContextValue | null>(null);
 
-export function I18nProvider({ children, initialLocale }: { children: ReactNode; initialLocale?: Locale }) {
+export function I18nProvider({
+  children,
+  initialLocale,
+}: {
+  children: ReactNode;
+  initialLocale?: Locale;
+}) {
   const [locale, setLocaleState] = useState<Locale>(initialLocale ?? DEFAULT_LOCALE);
+  const [agentName, setAgentNameState] = useState<string>('Anni');
   // Marker dass die Hydration durch ist - vorher dürfen wir die Sprache
   // nicht ändern (sonst React-Hydration-Error #418).
   const [hydrated, setHydrated] = useState(false);
 
-  // Beim Mount (NACH Hydration): Browser-Detection nochmal prüfen.
-  // Wir nutzen useEffect (nicht useLayoutEffect) damit React zuerst die
-  // Server-gerenderte Variante darstellt, dann ggf. auf die Client-Detection
-  // wechselt - dieser Wechsel triggert dann ein Re-Render aber KEINEN
-  // Hydration-Mismatch.
   useEffect(() => {
     setHydrated(true);
     const detected = detectInitialLocale();
     if (detected !== locale) setLocaleState(detected);
-    // Auf languagechange-Event hören (User ändert System-Sprache)
     const handler = () => {
       try {
         if (!window.localStorage.getItem(STORAGE_KEY)) {
@@ -783,26 +842,31 @@ export function I18nProvider({ children, initialLocale }: { children: ReactNode;
     try {
       window.localStorage.setItem(STORAGE_KEY, l);
     } catch {}
-    // <html lang> aktualisieren - hilft Screenreadern und SEO
     if (typeof document !== 'undefined') {
       document.documentElement.lang = l;
     }
   }, []);
 
-  // Übersetzungs-Funktion. Bei fehlendem Key: Fallback auf 'en', dann auf den Key selbst.
-  // Parameter werden mit {name} im Text ersetzt.
+  const setAgentName = useCallback((n: string) => {
+    setAgentNameState(n || 'Anni');
+  }, []);
+
+  // Übersetzungs-Funktion mit automatischem Agent-Namen-Replacement.
+  // Jeder {name}-Platzhalter wird durch den aktuellen agentName ersetzt -
+  // ohne dass jeder t()-Call explizit { name: ... } übergeben muss.
   const t = useCallback((key: string, params?: Record<string, string | number>) => {
     let str = TRANSLATIONS[locale]?.[key] ?? TRANSLATIONS.en[key] ?? key;
+    str = str.replace(/\{name\}/g, agentName);
     if (params) {
       for (const [k, v] of Object.entries(params)) {
         str = str.replace(new RegExp(`\\{${k}\\}`, 'g'), String(v));
       }
     }
     return str;
-  }, [locale]);
+  }, [locale, agentName]);
 
   return (
-    <I18nContext.Provider value={{ locale, setLocale, t }}>
+    <I18nContext.Provider value={{ locale, setLocale, agentName, setAgentName, t }}>
       {children}
     </I18nContext.Provider>
   );
@@ -815,7 +879,9 @@ export function useI18n(): I18nContextValue {
     return {
       locale: DEFAULT_LOCALE,
       setLocale: () => {},
-      t: (key: string) => TRANSLATIONS[DEFAULT_LOCALE][key] ?? key,
+      agentName: 'Anni',
+      setAgentName: () => {},
+      t: (key: string) => (TRANSLATIONS[DEFAULT_LOCALE][key] ?? key).replace(/\{name\}/g, 'Anni'),
     };
   }
   return ctx;

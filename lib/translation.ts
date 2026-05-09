@@ -131,7 +131,8 @@ const SOURCE_LANGUAGE_LABELS: Record<string, { name: string; nativeName: string 
 export function buildTranslatorPrompt(
   sourceLocale: string,
   targetLanguageEnglish: string,
-  targetLanguageNative: string
+  targetLanguageNative: string,
+  agentName: string = 'Anni',
 ): string {
   const source = SOURCE_LANGUAGE_LABELS[sourceLocale] || SOURCE_LANGUAGE_LABELS.en;
   const targetDisplay = targetLanguageNative
@@ -187,13 +188,24 @@ CORRECT output: "Can you help me?" (in ${targetLanguageEnglish})
 
 ## ENDING THE MODE
 
-ONLY when someone says one of these EXACT phrases:
-"Anni Übersetzung beenden", "Anni stop translation", "Anni stop",
-"Anni fine traduzione", "Anni arrête la traduction", "Anni alto traducción"
+The stop command MUST start with "${agentName}" and contain a stop verb.
+Valid stop phrases (examples):
+- "${agentName} Übersetzung beenden"
+- "${agentName} Übersetzungsmodus beenden"
+- "${agentName} stop translation"
+- "${agentName} stop"
+- "${agentName} ende Übersetzung"
+- "${agentName} fine traduzione"
+- "${agentName} arrête la traduction"
+- "${agentName} alto traducción"
 
-→ Call the tool stop_translation_mode. Do NOT translate that phrase.
+→ When you hear ANY phrase that starts with "${agentName}" AND contains a stop intent
+   (beenden, stop, ende, fine, arrête, alto, end, finish, terminate),
+   call the tool stop_translation_mode IMMEDIATELY.
+→ Do NOT translate that phrase. Do NOT speak. Just call the tool.
 
-If the phrase does NOT start with "Anni", IGNORE the stop intent and translate the sentence normally.
+CRITICAL: If a sentence does NOT start with "${agentName}", treat it as normal speech to translate -
+even if it contains words like "stop" or "beenden" in another context (e.g. "I want to stop the medication").
 
 ## DIRECTION CHECK
 

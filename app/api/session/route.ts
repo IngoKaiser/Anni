@@ -61,6 +61,14 @@ export async function POST(req: NextRequest) {
     };
   }
 
+  // Agent-Name validieren - nur Buchstaben, Leerzeichen, Bindestriche, max 30 Zeichen.
+  // Wird in System-Prompts eingebaut, daher Sanity-Check gegen Prompt-Injection.
+  const agentName =
+    typeof body?.agentName === 'string' &&
+    /^[\p{L}\s'-]{1,30}$/u.test(body.agentName.trim())
+      ? body.agentName.trim()
+      : 'Anni';
+
   // Translator-Mode: wenn body.translatorTarget gesetzt, erzeugen wir
   // eine Translation-Session statt einer normalen.
   let translatorOverride: any = undefined;
@@ -76,6 +84,7 @@ export async function POST(req: NextRequest) {
     console.log('[session] Translator request:', {
       requestedTarget: body.translatorTarget,
       sourceLocale,
+      agentName,
       resolvedLabel: lang.displayLabel,
       resolvedCode: lang.code,
     });
@@ -85,6 +94,7 @@ export async function POST(req: NextRequest) {
         sourceLocale,
         lang.label,
         lang.nativeLabel,
+        agentName,
       ),
       greeting: buildTranslatorGreeting(sourceLocale, lang.displayLabel),
     };
@@ -100,6 +110,7 @@ export async function POST(req: NextRequest) {
     const voiceSession = await createVoiceSession(tenant, userRole, isDemoUser, {
       voiceId: voiceOverride,
       locale: requestedLocale,
+      agentName,
       vadParams,
       translator: translatorOverride,
     });

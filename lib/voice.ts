@@ -50,7 +50,12 @@ const LANGUAGE_INSTRUCTION: Record<VoiceLocale, string> = {
   es: 'Habla en español con pronunciación natural.',
 };
 
-function buildSystemPrompt(tenant: TenantConfig, userRole: string, locale: VoiceLocale): string {
+function buildSystemPrompt(
+  tenant: TenantConfig,
+  userRole: string,
+  locale: VoiceLocale,
+  agentName: string,
+): string {
   const availableTools = tenant.tools.filter(
     t => t.enabled_for_roles.includes('all') || t.enabled_for_roles.includes(userRole)
   );
@@ -62,10 +67,7 @@ function buildSystemPrompt(tenant: TenantConfig, userRole: string, locale: Voice
   const langName = LOCALE_NAMES[locale];
   const langInstruction = LANGUAGE_INSTRUCTION[locale];
 
-  // Persona kommt aus YAML auf Deutsch - das ist okay, der Prompt ist nicht
-  // sichtbar für den User. Die Antwort selbst ist durch die Sprach-Anweisung
-  // immer in der gewünschten App-Sprache.
-  return `${tenant.agent.persona}
+  return `Du bist ${agentName}. ${tenant.agent.persona}
 
 Verfügbare Tools für deine Rolle:
 ${toolDescriptions}
@@ -73,23 +75,33 @@ ${toolDescriptions}
 Nutze die Tools selbständig, wenn der Nutzer eine Anfrage stellt, die zu einem Tool passt.
 Bestätige Tool-Aufrufe verbal kurz und prägnant.
 
-# ÜBERSETZUNGSMODUS
+# ÜBERSETZUNGSMODUS - Aktivierung
 
-Du hast ein Tool "start_translation_mode" für Dolmetscher-Anfragen. Es gibt nur ZWEI Pfade:
+Du hast ein Tool "start_translation_mode" für Dolmetscher-Anfragen.
+
+WICHTIG: Der Nutzer muss seinen Befehl IMMER mit "${agentName}" beginnen, sonst keine Aktion.
+Nur "${agentName} Übersetzung starten" / "${agentName} translation mode" / "${agentName} Dolmetscher" usw.
+zählen als Aktivierungs-Befehl. Ein "Übersetzung starten" ohne "${agentName}" davor IGNORIERST du
+und behandelst es wie normale Konversation.
 
 ## PFAD A: Sprache wurde direkt genannt
-Beispiele: "Übersetze ins Polnische", "Translation to English", "Dolmetscher für Türkisch"
-→ Rufe SOFORT start_translation_mode mit der genannten Sprache auf.
-→ KEINE verbale Antwort vorher. Direkt Tool aufrufen.
+Beispiele:
+- "${agentName}, übersetze ins Polnische"
+- "${agentName} translation to English"
+- "${agentName} Dolmetscher für Türkisch"
+→ Rufe SOFORT start_translation_mode mit der genannten Sprache auf. KEINE verbale Antwort vorher.
 
 ## PFAD B: Sprache fehlt
-Beispiele: "Übersetzung starten", "Dolmetscher", "Translation mode"
+Beispiele:
+- "${agentName}, Übersetzung starten"
+- "${agentName} Dolmetscher"
+- "${agentName} translation mode"
 → Frage genau einmal kurz: "In welche Sprache?"
 → SOBALD der Nutzer eine Sprache nennt (z.B. nur das Wort "Polnisch", "Polish", "Türkisch"),
    rufe SOFORT start_translation_mode mit dieser Sprache auf.
 → Wenn der Nutzer sagt "weiß ich nicht", "unbekannt", "no idea":
    rufe start_translation_mode mit targetLanguage="unknown" auf.
-→ KEINE Bestätigung wie "Okay, dann übersetze ich nach Polnisch". Sofort Tool aufrufen.
+→ KEINE Bestätigung wie "Okay". Sofort Tool aufrufen.
 
 ## WICHTIG
 - Nach dem Tool-Aufruf wird das System auf Übersetzungsmodus umschalten.
@@ -119,40 +131,47 @@ function buildToolSchema(tools: TenantTool[]): any[] {
 
 /**
  * System-Tools (verfügbar in jeder Realtime-Session unabhängig vom Tenant).
+ * Wird als Funktion gebaut, weil die Tool-Description den User-konfigurierten
+ * Agent-Namen als Trigger enthält.
  */
-const SYSTEM_TOOLS: any[] = [
-  {
-    type: 'function',
-    name: 'start_translation_mode',
-    description:
-      'Aktiviert den bidirektionalen Dolmetscher-Modus. NACH diesem Tool-Aufruf wird das System auf einen ' +
-      'speziellen Übersetzungs-Modus umschalten - der Nutzer kann dann frei zwischen App-Sprache und Zielsprache ' +
-      'wechseln und alles wird übersetzt. ' +
-      'WANN AUFRUFEN: (1) Direkt wenn Nutzer eine Sprache nennt zusammen mit Übersetzungs-Wunsch ' +
-      '("Übersetze ins Polnische") - sofort aufrufen. (2) Nach einer Rückfrage "In welche Sprache?" ' +
-      'sobald der Nutzer eine Sprache nennt - sofort aufrufen, NICHT weiter unterhalten. ' +
-      'targetLanguage: Sprache als deutsches/englisches Wort ("Polnisch", "Polish", "Türkisch"). ' +
-      'Falls Nutzer Sprache nicht kennt: "unknown".',
-    parameters: {
-      type: 'object',
-      properties: {
-        targetLanguage: {
-          type: 'string',
-          description: 'Die Zielsprache als Wort (z.B. "Polnisch", "Türkisch", "Englisch") oder "unknown".',
+function buildSystemTools(agentName: string): any[] {
+  return [
+    {
+      type: 'function',
+      name: 'start_translation_mode',
+      description:
+        `Aktiviert den bidirektionalen Dolmetscher-Modus. WICHTIG: Nur aufrufen wenn der Nutzer "${agentName}" als Prefix nennt. ` +
+        `Beispiele: "${agentName} Übersetzung starten", "${agentName} translation mode", "${agentName} ins Polnische übersetzen". ` +
+        'Ohne Prefix wird der Befehl IGNORIERT - dann normale Konversation. ' +
+        'WANN AUFRUFEN: (1) Direkt wenn Nutzer eine Sprache nennt zusammen mit Übersetzungs-Wunsch ' +
+        `("${agentName} Übersetze ins Polnische") - sofort aufrufen. (2) Nach einer Rückfrage "In welche Sprache?" ` +
+        'sobald der Nutzer eine Sprache nennt - sofort aufrufen, NICHT weiter unterhalten. ' +
+        'targetLanguage: Sprache als deutsches/englisches Wort ("Polnisch", "Polish", "Türkisch"). ' +
+        'Falls Nutzer Sprache nicht kennt: "unknown".',
+      parameters: {
+        type: 'object',
+        properties: {
+          targetLanguage: {
+            type: 'string',
+            description: 'Die Zielsprache als Wort (z.B. "Polnisch", "Türkisch", "Englisch") oder "unknown".',
+          },
         },
+        required: ['targetLanguage'],
       },
-      required: ['targetLanguage'],
     },
-  },
-  {
-    type: 'function',
-    name: 'stop_translation_mode',
-    description:
-      'Beendet den Übersetzungsmodus und kehrt zum Normalmodus zurück. ' +
-      'Aufrufen wenn jemand "Anni Übersetzung beenden", "Anni stop translation" o.ä. sagt.',
-    parameters: { type: 'object', properties: {} },
-  },
-];
+    {
+      type: 'function',
+      name: 'stop_translation_mode',
+      description:
+        'Beendet den Übersetzungsmodus und kehrt zum Normalmodus zurück. ' +
+        `Nur aufrufen wenn der Nutzer "${agentName}" als Prefix kombiniert mit einem Stop-Verb sagt. ` +
+        `Beispiele: "${agentName} Übersetzung beenden", "${agentName} stop translation", "${agentName} stoppen", ` +
+        `"${agentName} fine traduzione", "${agentName} arrête la traduction", "${agentName} alto traducción". ` +
+        'Ohne Prefix oder ohne Stop-Verb NICHT aufrufen - dann den Satz normal übersetzen.',
+      parameters: { type: 'object', properties: {} },
+    },
+  ];
+}
 
 /**
  * Erstellt eine Voice-Session.
@@ -169,6 +188,7 @@ export async function createVoiceSession(
   overrides?: {
     voiceId?: string;
     locale?: VoiceLocale;
+    agentName?: string;
     vadParams?: {
       threshold: number;
       silence_duration_ms: number;
@@ -182,22 +202,24 @@ export async function createVoiceSession(
 ): Promise<VoiceSessionDescriptor> {
   const isTranslator = !!overrides?.translator;
   const locale = overrides?.locale || 'de';
+  const agentName = overrides?.agentName || 'Anni';
 
   const systemPrompt = isTranslator
     ? overrides!.translator!.systemPrompt
-    : buildSystemPrompt(tenant, userRole, locale);
+    : buildSystemPrompt(tenant, userRole, locale, agentName);
 
   // Tools je nach Modus:
   // - Normal: Tenant-Tools + System-Tools (start/stop translation)
   // - Translator: NUR stop_translation_mode (sonst würde KI Vitalwerte etc. fälschlich rufen)
+  const systemTools = buildSystemTools(agentName);
   let tools: any[];
   if (isTranslator) {
-    tools = SYSTEM_TOOLS.filter(t => t.name === 'stop_translation_mode');
+    tools = systemTools.filter(t => t.name === 'stop_translation_mode');
   } else {
     const availableTools = tenant.tools.filter(
       t => t.enabled_for_roles.includes('all') || t.enabled_for_roles.includes(userRole)
     );
-    tools = [...buildToolSchema(availableTools), ...SYSTEM_TOOLS];
+    tools = [...buildToolSchema(availableTools), ...systemTools];
   }
 
   const effectiveVoiceId = overrides?.voiceId || tenant.agent.voice_id || 'marin';

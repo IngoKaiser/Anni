@@ -5,8 +5,10 @@
  *
  * Speichert:
  * - voiceId: gewählte OpenAI-Stimme (nur für echte User relevant)
- * - listenTimeoutSec: wie lange Anni nach einer Antwort weiter zuhört (3-60s)
+ * - listenTimeoutSec: wie lange der Agent nach einer Antwort weiter zuhört (3-60s)
  * - vadSensitivity: wie empfindlich die Spracherkennung ist
+ * - agentName: persönlicher Name des Voice-Agents (Default "Anni")
+ *   Wird als Trigger-Wort bei Übersetzungs-Aktivierung genutzt und in Stimmproben.
  *
  * Defaults sind bewusst konservativ: 10s Listening passen zu typischen
  * Pflege-Dialog-Pausen (Bewohner anschauen, kurz nachdenken, weiter sprechen).
@@ -31,12 +33,16 @@ export interface UserSettings {
   voiceId: string | null;          // null = Tenant-Default verwenden
   listenTimeoutSec: number;         // 3-60
   vadSensitivity: VadSensitivity;
+  agentName: string;                // Default "Anni" - Trigger-Wort für Modus-Wechsel
 }
+
+export const DEFAULT_AGENT_NAME = 'Anni';
 
 const DEFAULT_SETTINGS: UserSettings = {
   voiceId: null,
   listenTimeoutSec: 10,
   vadSensitivity: 'normal',
+  agentName: DEFAULT_AGENT_NAME,
 };
 
 export const LISTEN_TIMEOUT_MIN = 3;
@@ -84,6 +90,12 @@ function loadSettings(): UserSettings {
         parsed.vadSensitivity === 'high' || parsed.vadSensitivity === 'low'
           ? parsed.vadSensitivity
           : 'normal',
+      // Agent-Name: nur Buchstaben/Leerzeichen, max 30 Zeichen.
+      // Wird als Trigger-Wort genutzt - Sonderzeichen wären problematisch.
+      agentName:
+        typeof parsed.agentName === 'string' && /^[\p{L}\s'-]{1,30}$/u.test(parsed.agentName.trim())
+          ? parsed.agentName.trim()
+          : DEFAULT_AGENT_NAME,
     };
   } catch {
     return DEFAULT_SETTINGS;
