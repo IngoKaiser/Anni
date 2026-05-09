@@ -695,7 +695,28 @@ export default function VoiceApp({ tenant, user }: Props) {
 
       const dc = pc.createDataChannel('oai-events');
       dcRef.current = dc;
-      dc.onopen = () => setVoiceState('recording');
+      dc.onopen = () => {
+        setVoiceState('recording');
+
+        // DOPPEL-SICHERUNG: Tools und Instructions noch mal explizit per
+        // session.update setzen. Manchmal verwirft die Realtime-Beta-API
+        // die Tools die im REST-Endpoint mitgegeben wurden - dann redet
+        // das Modell ohne sie. Hier schieben wir sie nach.
+        try {
+          const updateMsg = {
+            type: 'session.update',
+            session: {
+              instructions: session.systemPrompt,
+              tools: session.tools || [],
+              tool_choice: 'auto',
+            },
+          };
+          dc.send(JSON.stringify(updateMsg));
+          debugAdd(`session.update sent: ${(session.tools || []).length} tools, translator=${session.isTranslator}`);
+        } catch (err) {
+          debugAdd(`session.update FAILED: ${err}`);
+        }
+      };
       dc.onmessage = (e) => {
         try { handleRealtimeEvent(JSON.parse(e.data)); }
         catch (err) { console.error(err); }
@@ -1070,8 +1091,12 @@ export default function VoiceApp({ tenant, user }: Props) {
         </div>
       )}
 
-      {/* Floating Debug-Toggle wenn Panel zu, aber Param gesetzt */}
-      {!debugVisible && typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1' && (
+      {/* Floating Debug-Toggle wenn Panel zu, aber Param gesetzt.
+          debugVisible ist nach hydrierten useEffect schon korrekt - hier
+          aber zusätzlich die Floating-Variante wenn Panel manuell geschlossen.
+          Wir nutzen NUR debugVisible-State hier, kein direkter window-Zugriff
+          (sonst Hydration-Mismatch). */}
+      {!debugVisible && debugLog.length > 0 && (
         <button
           onClick={() => setDebugVisible(true)}
           className="fixed bottom-2 right-2 w-10 h-10 rounded-full bg-black/80 text-emerald-300 z-50 shadow-lg text-base"

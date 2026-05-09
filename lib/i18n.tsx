@@ -751,14 +751,21 @@ const I18nContext = createContext<I18nContextValue | null>(null);
 
 export function I18nProvider({ children, initialLocale }: { children: ReactNode; initialLocale?: Locale }) {
   const [locale, setLocaleState] = useState<Locale>(initialLocale ?? DEFAULT_LOCALE);
+  // Marker dass die Hydration durch ist - vorher dürfen wir die Sprache
+  // nicht ändern (sonst React-Hydration-Error #418).
+  const [hydrated, setHydrated] = useState(false);
 
-  // Beim Mount: Browser-Detection nochmal prüfen (falls SSR mit anderer Annahme gerendert hat)
+  // Beim Mount (NACH Hydration): Browser-Detection nochmal prüfen.
+  // Wir nutzen useEffect (nicht useLayoutEffect) damit React zuerst die
+  // Server-gerenderte Variante darstellt, dann ggf. auf die Client-Detection
+  // wechselt - dieser Wechsel triggert dann ein Re-Render aber KEINEN
+  // Hydration-Mismatch.
   useEffect(() => {
+    setHydrated(true);
     const detected = detectInitialLocale();
     if (detected !== locale) setLocaleState(detected);
     // Auf languagechange-Event hören (User ändert System-Sprache)
     const handler = () => {
-      // Nur reagieren wenn User noch keine manuelle Wahl gemacht hat
       try {
         if (!window.localStorage.getItem(STORAGE_KEY)) {
           const newDetected = detectInitialLocale();

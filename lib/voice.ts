@@ -240,6 +240,12 @@ export async function createVoiceSession(
       model: 'gpt-4o-realtime-preview-2024-12-17',
       voice: effectiveVoiceId,
       instructions: systemPrompt,
+      // Tools müssen hier mitgegeben werden, sonst kennt das Modell sie nicht
+      // und kann sie auch nicht aufrufen. Vorher fehlte das - deshalb hat
+      // das Modell auf "Übersetzung starten" nur dialogisch geantwortet,
+      // statt das Tool start_translation_mode aufzurufen.
+      tools,
+      tool_choice: 'auto',
       input_audio_transcription: { model: 'gpt-4o-mini-transcribe' },
       input_audio_noise_reduction: { type: 'near_field' },
       turn_detection: {
