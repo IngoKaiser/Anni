@@ -27,6 +27,9 @@ export type AuditEvent =
   | 'session.ended'
   | 'tool.invoked'
   | 'tool.failed'
+  | 'tool.confirmed'
+  | 'tool.cancelled'
+  | 'knowledge.query'
   | 'login.success'
   | 'login.failed'
   | 'logout';

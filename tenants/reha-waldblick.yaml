@@ -33,6 +33,7 @@ tools:
     label: "Therapie-Einheit dokumentieren"
     description: "Protokolliert eine durchgeführte Therapie-Einheit mit Übungen, Wiederholungen, Patientenreaktion"
     type: webhook
+    require_confirmation: true
     url: "https://mock-pms.example/therapie"
     enabled_for_roles: [therapeut, pflegefachkraft]
 
@@ -40,6 +41,7 @@ tools:
     label: "Schmerz-NRS erfassen"
     description: "Speichert Schmerzwert auf NRS-Skala (0-10) mit Lokalisation und Charakter"
     type: webhook
+    require_confirmation: true
     url: "https://mock-pms.example/schmerz"
     enabled_for_roles: [therapeut, pflegefachkraft, arzt]
 
@@ -47,6 +49,7 @@ tools:
     label: "Mobilitäts-Assessment"
     description: "Erfasst Barthel-Index oder Tinetti-Test für Mobilitätsbewertung"
     type: webhook
+    require_confirmation: true
     url: "https://mock-pms.example/assessment"
     enabled_for_roles: [therapeut, pflegefachkraft]
 
@@ -75,6 +78,7 @@ tools:
     label: "Verlaufsbericht erstellen"
     description: "Generiert Wochen-Verlaufsbericht aus dokumentierten Therapie-Einheiten"
     type: webhook
+    require_confirmation: true
     url: "https://mock-pms.example/verlauf"
     enabled_for_roles: [therapeut, arzt]
 

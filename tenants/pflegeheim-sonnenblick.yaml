@@ -34,6 +34,7 @@ tools:
     label: "Vitalwerte speichern"
     description: "Speichert Blutdruck, Puls, Temperatur, Sauerstoffsättigung in MediFox"
     type: webhook
+    require_confirmation: true
     url: "https://mock-pms.example/observation"
     enabled_for_roles: [pflegefachkraft, pflegehelfer]
     parameters:
@@ -51,6 +52,7 @@ tools:
     label: "Beobachtung dokumentieren"
     description: "Trägt eine pflegerische Beobachtung in die Doku ein"
     type: webhook
+    require_confirmation: true
     url: "https://mock-pms.example/observation"
     enabled_for_roles: [pflegefachkraft, pflegehelfer]
 
@@ -72,6 +74,7 @@ tools:
     label: "Sturzprotokoll erfassen"
     description: "Legt ein neues Sturzprotokoll mit Sturzort, Verletzungen, Maßnahmen an"
     type: webhook
+    require_confirmation: true
     url: "https://mock-pms.example/sturzprotokoll"
     enabled_for_roles: [pflegefachkraft]
 
@@ -79,6 +82,7 @@ tools:
     label: "Übergabe-Notiz"
     description: "Hinterlegt eine Notiz für die nächste Schicht"
     type: webhook
+    require_confirmation: true
     url: "https://mock-pms.example/uebergabe"
     enabled_for_roles: [pflegefachkraft, pflegehelfer]
 

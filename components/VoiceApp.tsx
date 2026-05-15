@@ -11,6 +11,7 @@ import {
 import type { PublicTenantConfig } from '@/lib/tenants';
 import { useSpeechSynthesis } from '@/lib/use-speech-synthesis';
 import { useUserSettings, OPENAI_VOICES, LISTEN_TIMEOUT_MIN, LISTEN_TIMEOUT_MAX, vadSensitivityToParams } from '@/lib/use-user-settings';
+import { useHeadsetMediaKeys } from '@/lib/use-headset-mediakeys';
 import { useI18n, SUPPORTED_LOCALES, buildVoicePreviewText, type Locale } from '@/lib/i18n';
 import VoicePicker from './VoicePicker';
 
@@ -23,14 +24,37 @@ type VoiceState = 'idle' | 'connecting' | 'recording' | 'processing' | 'respondi
  */
 interface Turn {
   id: number;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   text: string;
   timestamp: number;
-  toolCalls?: { id: string; label: string }[];
+  toolCalls?: { id: string; label: string; status?: 'pending' | 'confirmed' | 'cancelled' | 'executed' | 'failed' }[];
   /** Im Translator-Mode: Sprache des Originals (BCP-47 oder freier Name) */
   sourceLang?: string;
   /** Im Translator-Mode: nach diesem Turn wurde die Übersetzung (assistant) gemerged */
   translation?: string;
+
+  /**
+   * Bestätigungs-Card für ein schreibendes Tool (Human-in-the-Loop).
+   * Wird vom Frontend gerendert sobald Modell ein Tool aufrufen will.
+   */
+  toolConfirmation?: {
+    toolId: string;
+    toolLabel: string;
+    summary: string;
+    args: any;
+    status: 'pending' | 'confirmed' | 'cancelled';
+  };
+
+  /**
+   * Wissens-Card mit Quellen-Audit-Trail.
+   * Wird vom Frontend gerendert wenn das Modell Pflegewissen abfragt.
+   */
+  knowledge?: {
+    query: string;
+    answer: string;
+    citations: { url: string; title: string; domain: string; isTrusted: boolean }[];
+    hasTrustedSources: boolean;
+  };
 }
 
 interface User {
@@ -51,6 +75,38 @@ function withAlpha(hex: string, alpha: number): string {
   const g = parseInt(hex.slice(3, 5), 16);
   const b = parseInt(hex.slice(5, 7), 16);
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+/**
+ * Formatiert Tool-Args als gut lesbare Liste für die Bestätigungs-Card.
+ * Aus { bewohner: "Frau Müller", blutdruck: "130/85", puls: 72 } wird:
+ *   - Bewohner: Frau Müller
+ *   - Blutdruck: 130/85
+ *   - Puls: 72
+ *
+ * Key-Namen werden hübsch gemacht (snake_case → Title Case mit DE-Übersetzungen
+ * für gängige Pflege-Begriffe).
+ */
+const KEY_LABELS_DE: Record<string, string> = {
+  bewohner: 'Bewohner', patient: 'Patient', kunde: 'Kunde',
+  blutdruck: 'Blutdruck', puls: 'Puls', temperatur: 'Temperatur',
+  sauerstoff: 'Sauerstoffsättigung', medikament: 'Medikament', dosierung: 'Dosierung',
+  zeit: 'Zeit', datum: 'Datum', notiz: 'Notiz', beobachtung: 'Beobachtung',
+  sturzort: 'Sturzort', verletzung: 'Verletzung', massnahme: 'Maßnahme',
+  einsatz: 'Einsatz', dauer: 'Dauer', taetigkeit: 'Tätigkeit',
+};
+
+function formatToolArgsAsSummary(args: any): string {
+  if (!args || typeof args !== 'object') return '';
+  const entries = Object.entries(args)
+    .filter(([_, v]) => v !== null && v !== undefined && v !== '')
+    .map(([k, v]) => {
+      const label = KEY_LABELS_DE[k.toLowerCase()] ||
+        k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      const value = typeof v === 'object' ? JSON.stringify(v) : String(v);
+      return `${label}: ${value}`;
+    });
+  return entries.join('\n');
 }
 
 // Demo-Dialoge pro Tenant - werden für Demo-User abgespielt
@@ -151,14 +207,25 @@ export default function VoiceApp({ tenant, user }: Props) {
   }, []);
 
   // Translator-Mode-State
-  // - translatorActive: ist der Modus überhaupt an (UI auf eigenen Bildschirm)?
-  // - translatorTarget: kompletter Info-Block über die Zielsprache
   const [translatorActive, setTranslatorActive] = useState(false);
   const [translatorTarget, setTranslatorTarget] = useState<{
     label: string;
     code?: string;
     flag?: string;
     nativeLabel?: string;
+  } | null>(null);
+
+  // Tool-Bestätigung: wenn das Modell ein schreibendes Tool aufrufen will,
+  // halten wir den Call hier zwischen bis der User per Voice ("Ja"/"Nein")
+  // oder per Klick auf der Card bestätigt/ablehnt.
+  // null = nichts pending, sonst die Tool-Call-Daten + visible Card-ID
+  const [pendingTool, setPendingTool] = useState<{
+    callId: string;
+    toolId: string;
+    toolLabel: string;
+    args: any;
+    summary: string;       // Strukturierte Zusammenfassung was getan wird
+    cardTurnId: number;    // Welcher Turn die Bestätigungs-Card rendert
   } | null>(null);
 
   const idCounter = useRef(0);
@@ -442,28 +509,6 @@ export default function VoiceApp({ tenant, user }: Props) {
   const lastUserTranscriptRef = useRef<string>('');
 
   /**
-   * Prüft ob das letzte User-Transkript den Agent-Namen als Trigger-Wort enthält.
-   * Robust gegen:
-   * - Groß/Klein-Schreibung
-   * - Satzzeichen direkt nach dem Namen ("Anni,", "Anni.", "Anni!")
-   * - Verschiedene Aussprache-Transkriptionen ("Annie", "Annik" → false negative ist okay,
-   *   der User wird's merken und richtig sprechen)
-   *
-   * Match-Logik: Name als isoliertes Wort (Wortgrenze davor und danach).
-   * Ein Vorkommen reicht - Position ist egal (Anfang/Mitte/Ende).
-   */
-  const hasAgentPrefix = useCallback((transcript: string): boolean => {
-    if (!transcript) return false;
-    const name = (settings.agentName || 'Anni').trim();
-    if (!name) return false;
-    // Word-Boundary-Match, case-insensitive, Unicode-aware (für Namen mit Umlauten)
-    // Beispiel-Pattern für Name="Anni": /\banni\b/iu
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(`\\b${escaped}\\b`, 'iu');
-    return re.test(transcript);
-  }, [settings.agentName]);
-
-  /**
    * Antwort an OpenAI nach abgelehntem Tool-Call: Tool-Output mit Fehler-Hinweis,
    * damit das Modell normal weiterredet statt zu warten oder zu wiederholen.
    * Ohne diesen Output bleibt das Modell hängen und sendet nichts mehr.
@@ -489,6 +534,85 @@ export default function VoiceApp({ tenant, user }: Props) {
     }
   }, [debugAdd]);
 
+  /**
+   * User bestätigt einen pending Tool-Call (per Klick oder per Voice "Ja").
+   * Wir führen das Tool aus, updaten die Card, und schicken function_call_output ans Modell.
+   */
+  const confirmPendingTool = useCallback(() => {
+    const p = pendingTool;
+    if (!p) return;
+    debugAdd(`✓ confirmed: ${p.toolLabel}`);
+
+    // Card auf "confirmed" setzen
+    setTurns(prev => prev.map(t =>
+      t.id === p.cardTurnId && t.toolConfirmation
+        ? { ...t, toolConfirmation: { ...t.toolConfirmation, status: 'confirmed' } }
+        : t
+    ));
+
+    // Tool jetzt ausführen
+    fetch('/api/tools/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ toolId: p.toolId, args: p.args }),
+    })
+      .then(r => r.json())
+      .then((data: any) => {
+        // Modell informieren
+        const dc = dcRef.current;
+        if (dc && dc.readyState === 'open' && p.callId) {
+          dc.send(JSON.stringify({
+            type: 'conversation.item.create',
+            item: {
+              type: 'function_call_output',
+              call_id: p.callId,
+              output: JSON.stringify({ ...data, confirmedByUser: true }),
+            },
+          }));
+          dc.send(JSON.stringify({ type: 'response.create' }));
+        }
+      })
+      .catch((err: any) => {
+        debugAdd(`tool exec failed: ${err?.message}`);
+        sendToolRejection(p.callId, `Tool execution failed: ${err?.message || 'unknown'}`);
+      });
+
+    setPendingTool(null);
+  }, [pendingTool, debugAdd, sendToolRejection]);
+
+  /**
+   * User lehnt einen pending Tool-Call ab (per Klick oder per Voice "Nein").
+   * Wir markieren die Card als cancelled und informieren das Modell.
+   */
+  const cancelPendingTool = useCallback(() => {
+    const p = pendingTool;
+    if (!p) return;
+    debugAdd(`✗ cancelled: ${p.toolLabel}`);
+
+    setTurns(prev => prev.map(t =>
+      t.id === p.cardTurnId && t.toolConfirmation
+        ? { ...t, toolConfirmation: { ...t.toolConfirmation, status: 'cancelled' } }
+        : t
+    ));
+
+    // Modell informieren dass abgelehnt - es soll korrigieren oder weiterfragen
+    sendToolRejection(
+      p.callId,
+      'User cancelled this action. Ask the user how they would like to proceed or what should be corrected.'
+    );
+
+    setPendingTool(null);
+  }, [pendingTool, debugAdd, sendToolRejection]);
+
+  // Refs auf die confirm/cancel-Funktionen, damit handleRealtimeEvent
+  // (das kein useCallback ist) immer die aktuelle Version sieht.
+  const pendingToolRef = useRef(pendingTool);
+  const confirmPendingToolRef = useRef<() => void>(() => {});
+  const cancelPendingToolRef = useRef<() => void>(() => {});
+  useEffect(() => { pendingToolRef.current = pendingTool; }, [pendingTool]);
+  useEffect(() => { confirmPendingToolRef.current = confirmPendingTool; }, [confirmPendingTool]);
+  useEffect(() => { cancelPendingToolRef.current = cancelPendingTool; }, [cancelPendingTool]);
+
   const dispatchToolCall = useCallback((toolName: string, args: any, callId?: string) => {
     if (!toolName) return;
 
@@ -504,19 +628,6 @@ export default function VoiceApp({ tenant, user }: Props) {
 
     // System-Tool: Translator starten
     if (toolName === 'start_translation_mode') {
-      // ENFORCEMENT: Prefix muss im letzten User-Transkript stehen.
-      // Das Modell hält sich nicht zuverlässig an die Prompt-Anweisung,
-      // also Hard-Check im Code.
-      const transcript = lastUserTranscriptRef.current;
-      if (!hasAgentPrefix(transcript)) {
-        debugAdd(`✗ start_translation_mode REJECTED: no prefix in "${transcript.slice(0, 60)}"`);
-        sendToolRejection(
-          callId,
-          `Translation mode can only be activated when the user says "${settings.agentName}" as a prefix. The last user message was: "${transcript}". Please respond conversationally - do NOT activate translation mode.`
-        );
-        return;
-      }
-
       const target = typeof args?.targetLanguage === 'string' && args.targetLanguage.length > 0
         ? args.targetLanguage
         : 'unknown';
@@ -531,17 +642,6 @@ export default function VoiceApp({ tenant, user }: Props) {
 
     // System-Tool: Translator beenden
     if (toolName === 'stop_translation_mode') {
-      // Auch hier: Prefix-Check.
-      const transcript = lastUserTranscriptRef.current;
-      if (!hasAgentPrefix(transcript)) {
-        debugAdd(`✗ stop_translation_mode REJECTED: no prefix in "${transcript.slice(0, 60)}"`);
-        sendToolRejection(
-          callId,
-          `Translation mode can only be ended when the user says "${settings.agentName}" as a prefix. The last user message was: "${transcript}". Please translate the message normally - do NOT end translation mode.`
-        );
-        return;
-      }
-
       debugAdd('→ stop_translation_mode');
       cleanupRealtime();
       setTranslatorActive(false);
@@ -551,23 +651,176 @@ export default function VoiceApp({ tenant, user }: Props) {
       return;
     }
 
-    // Normales Tenant-Tool - kein Prefix-Check nötig, das ist gewünschtes Verhalten
-    if (currentAssistantTurnRef.current) {
-      const id = currentAssistantTurnRef.current.id;
-      const tool = tenant.tools.find(t => t.id === toolName);
-      setTurns(prev => prev.map(t =>
-        t.id === id
-          ? { ...t, toolCalls: [...(t.toolCalls || []), { id: toolName, label: tool?.label || toolName }] }
-          : t
-      ));
-      fetch('/api/tools/execute', {
+    // System-Tool: Pflegewissen abfragen.
+    // Direkt durchführen, keine Bestätigung (Lese-Tool).
+    if (toolName === 'lookup_pflegewissen') {
+      const query = typeof args?.query === 'string' ? args.query : '';
+      if (!query) {
+        sendToolRejection(callId, 'No query provided');
+        return;
+      }
+      debugAdd(`→ lookup_pflegewissen query="${query.slice(0, 60)}"`);
+
+      // Platzhalter-Card sofort einfügen damit der User Feedback sieht
+      const turnId = ++idCounter.current;
+      setTurns(prev => [...prev, {
+        id: turnId,
+        role: 'assistant',
+        text: '',
+        timestamp: Date.now(),
+        knowledge: {
+          query,
+          answer: '__loading__',
+          citations: [],
+          hasTrustedSources: false,
+        },
+      }]);
+
+      // Request an unsere API
+      fetch('/api/knowledge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ toolId: toolName, args }),
-      }).catch(() => {});
+        body: JSON.stringify({ query, locale }),
+      })
+        .then(r => r.json())
+        .then((data: any) => {
+          if (data.error) throw new Error(data.error);
+          // Card mit Antwort updaten
+          setTurns(prev => prev.map(t =>
+            t.id === turnId
+              ? {
+                  ...t,
+                  knowledge: {
+                    query,
+                    answer: data.answer || '',
+                    citations: data.citations || [],
+                    hasTrustedSources: !!data.hasTrustedSources,
+                  },
+                }
+              : t
+          ));
+          // Modell informieren dass Knowledge-Abruf fertig - mit gekürzter Antwort,
+          // damit es dem User die Kernaussage vorlesen kann ohne die Quellen-Box.
+          const dc = dcRef.current;
+          if (dc && dc.readyState === 'open' && callId) {
+            try {
+              dc.send(JSON.stringify({
+                type: 'conversation.item.create',
+                item: {
+                  type: 'function_call_output',
+                  call_id: callId,
+                  output: JSON.stringify({
+                    answer: data.answer,
+                    hasTrustedSources: data.hasTrustedSources,
+                    sourceCount: (data.citations || []).length,
+                  }),
+                },
+              }));
+              dc.send(JSON.stringify({ type: 'response.create' }));
+            } catch {}
+          }
+          debugAdd(`knowledge: ${(data.citations || []).length} sources, trusted=${data.hasTrustedSources}`);
+        })
+        .catch((err: any) => {
+          debugAdd(`knowledge FAILED: ${err?.message || err}`);
+          // Card mit Fehler updaten
+          setTurns(prev => prev.map(t =>
+            t.id === turnId
+              ? {
+                  ...t,
+                  knowledge: {
+                    query,
+                    answer: `⚠ Fehler beim Nachschlagen: ${err?.message || 'Unbekannt'}`,
+                    citations: [],
+                    hasTrustedSources: false,
+                  },
+                }
+              : t
+          ));
+          sendToolRejection(callId, `Knowledge lookup failed: ${err?.message || 'unknown'}`);
+        });
+      return;
     }
+
+    // Tenant-Tool: Bestätigungs-Flow je nach require_confirmation
+    const tool = tenant.tools.find(t => t.id === toolName);
+    if (!tool) {
+      debugAdd(`unknown tool ${toolName}`);
+      sendToolRejection(callId, `Unknown tool: ${toolName}`);
+      return;
+    }
+
+    if (tool.require_confirmation) {
+      // SCHREIBENDES Tool - User muss bestätigen.
+      // Wir bauen eine strukturierte Zusammenfassung aus args (key-value als Liste).
+      const summary = formatToolArgsAsSummary(args);
+      const turnId = ++idCounter.current;
+
+      setTurns(prev => [...prev, {
+        id: turnId,
+        role: 'system',
+        text: '',
+        timestamp: Date.now(),
+        toolConfirmation: {
+          toolId: tool.id,
+          toolLabel: tool.label,
+          summary,
+          args,
+          status: 'pending',
+        },
+      }]);
+
+      setPendingTool({
+        callId: callId || '',
+        toolId: tool.id,
+        toolLabel: tool.label,
+        args,
+        summary,
+        cardTurnId: turnId,
+      });
+
+      debugAdd(`pending confirmation: ${tool.label}`);
+      // WICHTIG: keine function_call_output schicken! Das Modell wartet
+      // auf die Antwort. Nach Bestätigung/Ablehnung schicken wir die Antwort.
+      return;
+    }
+
+    // LESE-Tool (kein require_confirmation) - direkt ausführen
+    debugAdd(`→ execute ${tool.label} (no confirm)`);
+    if (currentAssistantTurnRef.current) {
+      const id = currentAssistantTurnRef.current.id;
+      setTurns(prev => prev.map(t =>
+        t.id === id
+          ? { ...t, toolCalls: [...(t.toolCalls || []), { id: toolName, label: tool.label, status: 'executed' }] }
+          : t
+      ));
+    }
+    fetch('/api/tools/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ toolId: toolName, args }),
+    })
+      .then(r => r.json())
+      .then((data: any) => {
+        const dc = dcRef.current;
+        if (dc && dc.readyState === 'open' && callId) {
+          dc.send(JSON.stringify({
+            type: 'conversation.item.create',
+            item: {
+              type: 'function_call_output',
+              call_id: callId,
+              output: JSON.stringify(data),
+            },
+          }));
+          dc.send(JSON.stringify({ type: 'response.create' }));
+        }
+      })
+      .catch((err: any) => {
+        debugAdd(`tool ${toolName} failed: ${err?.message}`);
+        sendToolRejection(callId, `Tool execution failed: ${err?.message || 'unknown'}`);
+      });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenant, debugAdd, hasAgentPrefix, sendToolRejection, settings.agentName]);
+  }, [tenant, debugAdd, sendToolRejection, locale]);
 
   const handleRealtimeEvent = (ev: any) => {
     // Jeder Event-Typ kommt ins Debug-Log. So sehen wir genau was OpenAI sendet.
@@ -604,12 +857,25 @@ export default function VoiceApp({ tenant, user }: Props) {
           setTurns(prev => prev.map(t => t.id === id ? { ...t, text: ev.transcript } : t));
           currentUserTurnRef.current = null;
         }
-        // Letztes Transkript merken für Prefix-Validierung bei Tool-Calls.
-        // Wir lowercase'n + normalisieren Whitespace, damit der Match
-        // robust ist gegen Aussprache-Variationen ("Anni," "anni." etc).
         if (typeof ev.transcript === 'string') {
           lastUserTranscriptRef.current = ev.transcript;
           debugAdd(`transcript: "${ev.transcript.slice(0, 60)}"`);
+
+          // Voice-Confirmation: wenn ein Tool-Call pending ist und der User
+          // "Ja"/"Nein" sagt, automatisch bestätigen/ablehnen.
+          // Wir hören auf möglichst eindeutige Phrasen über mehrere Sprachen.
+          if (pendingToolRef.current) {
+            const t = ev.transcript.toLowerCase().trim();
+            const confirmWords = /\b(ja|jawohl|bestätige|bestätigt|bestätigung|okay|ok|eintragen|speichern|durchführen|yes|confirm|sì|si|oui|sí)\b/i;
+            const cancelWords = /\b(nein|abbrechen|stopp|stop|abbruch|löschen|verwerfen|no|cancel|non|nicht)\b/i;
+            if (confirmWords.test(t) && !cancelWords.test(t)) {
+              debugAdd(`voice confirm detected in: "${t.slice(0, 40)}"`);
+              confirmPendingToolRef.current?.();
+            } else if (cancelWords.test(t)) {
+              debugAdd(`voice cancel detected in: "${t.slice(0, 40)}"`);
+              cancelPendingToolRef.current?.();
+            }
+          }
         }
         break;
       case 'response.created':
@@ -959,6 +1225,15 @@ export default function VoiceApp({ tenant, user }: Props) {
     stopSpeech();
   };
 
+  // Headset Media-Keys: Bluetooth-Play/Pause-Taste löst handleTap aus,
+  // genauso als hätte der User auf den Tap-Button gedrückt.
+  // Aktiviert nach erster User-Interaktion (Browser-Audio-Restriktion).
+  const headset = useHeadsetMediaKeys({
+    onTap: handleTap,
+    voiceState,
+    enabled: settings.headsetMediaKeys && !isDemoUser, // Demo nutzt Web Speech, hat eigenes Audio
+  });
+
   const handleLogout = async () => {
     await signOut({ callbackUrl: '/login' });
   };
@@ -1139,7 +1414,28 @@ export default function VoiceApp({ tenant, user }: Props) {
         ) : (
           translatorActive
             ? renderTranslatorTurns(turns, locale, translatorTarget, t)
-            : turns.map(turn => <TurnCard key={turn.id} turn={turn} primary={primary} t={t} />)
+            : turns.map(turn => {
+                // Tool-Bestätigung
+                if (turn.toolConfirmation) {
+                  return (
+                    <ToolConfirmCard
+                      key={turn.id}
+                      turn={turn}
+                      primary={primary}
+                      t={t}
+                      onConfirm={confirmPendingTool}
+                      onCancel={cancelPendingTool}
+                      isPending={pendingTool?.cardTurnId === turn.id}
+                    />
+                  );
+                }
+                // Wissens-Card
+                if (turn.knowledge) {
+                  return <KnowledgeCard key={turn.id} turn={turn} primary={primary} t={t} />;
+                }
+                // Standard Turn
+                return <TurnCard key={turn.id} turn={turn} primary={primary} t={t} />;
+              })
         )}
         <div ref={dialogEndRef} />
       </div>
@@ -1165,7 +1461,20 @@ export default function VoiceApp({ tenant, user }: Props) {
           {translatorActive ? (
             <p className="text-[11px] text-stone-400 mt-1">{t('translator.endHint')}</p>
           ) : (
-            <p className="text-[11px] text-stone-400 mt-1">{t('ptt.hint')}</p>
+            <div className="flex items-center gap-1.5 mt-1">
+              <p className="text-[11px] text-stone-400">{t('ptt.hint')}</p>
+              {headset.isActive && (
+                <span
+                  className="text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700"
+                  title={t('headset.activeHint')}
+                >
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 1a9 9 0 0 0-9 9v7c0 1.66 1.34 3 3 3h3v-8H5v-2a7 7 0 0 1 14 0v2h-4v8h3c1.66 0 3-1.34 3-3v-7a9 9 0 0 0-9-9z"/>
+                  </svg>
+                  {t('headset.active')}
+                </span>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -1183,6 +1492,8 @@ export default function VoiceApp({ tenant, user }: Props) {
           locale={locale}
           setLocale={setLocale}
           t={t}
+          headsetIsActive={headset.isActive}
+          isDemoUser={isDemoUser}
         />
       )}
 
@@ -1290,6 +1601,154 @@ function TalkButton({ voiceState, audioLevel, primary, onTap }: any) {
 }
 
 /* ─────────── Turn Card ─────────── */
+
+/* ─────────── Tool-Bestätigungs-Card (Human-in-the-Loop) ─────────── */
+
+function ToolConfirmCard({ turn, primary, t, onConfirm, onCancel, isPending }: any) {
+  const c = turn.toolConfirmation;
+  if (!c) return null;
+  const status: 'pending' | 'confirmed' | 'cancelled' = c.status;
+
+  // Visuelle Variante je Status
+  const isPendingStatus = status === 'pending';
+  const isConfirmed = status === 'confirmed';
+  const isCancelled = status === 'cancelled';
+
+  const time = new Date(turn.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+
+  return (
+    <div
+      className="rounded-2xl border-2 shadow-sm overflow-hidden"
+      style={{
+        borderColor: isConfirmed ? '#34D399' : isCancelled ? '#FDA4AF' : primary,
+        background: isConfirmed ? '#F0FDF4' : isCancelled ? '#FFF1F2' : '#FFFFFF',
+      }}
+    >
+      <div className="px-4 py-2.5 flex items-center justify-between gap-2 border-b" style={{ borderColor: isConfirmed ? '#D1FAE5' : isCancelled ? '#FECDD3' : '#E7E5E4' }}>
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <Wrench size={14} style={{ color: isConfirmed ? '#059669' : isCancelled ? '#E11D48' : primary }} />
+          <span className="text-xs font-semibold text-stone-800 truncate">{c.toolLabel}</span>
+        </div>
+        <span className="text-[10px] font-mono text-stone-400 shrink-0">{time}</span>
+      </div>
+
+      <div className="px-4 py-3">
+        <p className="text-[10px] uppercase tracking-wider text-stone-500 font-semibold mb-1.5">
+          {t('tool.confirmSummary')}
+        </p>
+        <pre className="text-[13px] text-stone-800 leading-snug whitespace-pre-wrap font-sans">{c.summary}</pre>
+      </div>
+
+      {isPendingStatus && isPending && (
+        <div className="px-4 py-2.5 border-t border-stone-200 bg-stone-50 flex items-center gap-2">
+          <button
+            onClick={onConfirm}
+            className="flex-1 py-2 rounded-xl font-semibold text-sm text-white transition"
+            style={{ background: primary }}
+          >
+            ✓ {t('tool.confirm')}
+          </button>
+          <button
+            onClick={onCancel}
+            className="flex-1 py-2 rounded-xl font-semibold text-sm border-2 border-stone-300 text-stone-600 hover:bg-stone-100 transition"
+          >
+            ✗ {t('tool.cancel')}
+          </button>
+        </div>
+      )}
+
+      {isConfirmed && (
+        <div className="px-4 py-2 bg-emerald-50 border-t border-emerald-100 flex items-center gap-1.5">
+          <span className="text-emerald-700 text-[11px] font-semibold">✓ {t('tool.confirmed')}</span>
+        </div>
+      )}
+
+      {isCancelled && (
+        <div className="px-4 py-2 bg-rose-50 border-t border-rose-100 flex items-center gap-1.5">
+          <span className="text-rose-700 text-[11px] font-semibold">✗ {t('tool.cancelled')}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────── Wissens-Card mit Quellen-Audit ─────────── */
+
+function KnowledgeCard({ turn, primary, t }: any) {
+  const k = turn.knowledge;
+  if (!k) return null;
+  const isLoading = k.answer === '__loading__';
+
+  const time = new Date(turn.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+
+  return (
+    <div className="rounded-2xl border border-stone-200 bg-white shadow-sm overflow-hidden">
+      {/* Header */}
+      <div className="px-4 py-2.5 flex items-center justify-between gap-2 border-b border-stone-100" style={{ background: 'linear-gradient(90deg, #EFF6FF 0%, #EEF2FF 100%)' }}>
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" className="text-blue-600 shrink-0">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <span className="text-xs font-semibold text-stone-800 truncate">{t('knowledge.title')}</span>
+        </div>
+        <span className="text-[10px] font-mono text-stone-400 shrink-0">{time}</span>
+      </div>
+
+      {/* Query */}
+      <div className="px-4 py-2 bg-stone-50 border-b border-stone-100">
+        <p className="text-[10px] uppercase tracking-wider text-stone-500 font-semibold">{t('knowledge.question')}</p>
+        <p className="text-[13px] text-stone-700 mt-0.5 italic">"{k.query}"</p>
+      </div>
+
+      {/* Antwort */}
+      <div className="px-4 py-3">
+        {isLoading ? (
+          <div className="flex items-center gap-2 text-stone-500 text-sm">
+            <Loader2 size={14} className="animate-spin" />
+            <span>{t('knowledge.searching')}</span>
+          </div>
+        ) : (
+          <div className="text-[13px] text-stone-800 leading-relaxed whitespace-pre-wrap">{k.answer}</div>
+        )}
+      </div>
+
+      {/* Quellen / Audit-Trail */}
+      {!isLoading && k.citations && k.citations.length > 0 && (
+        <div className="px-4 py-2.5 bg-stone-50 border-t border-stone-100">
+          <p className="text-[10px] uppercase tracking-wider text-stone-500 font-semibold mb-1.5">
+            {t('knowledge.sources')} ({k.citations.length})
+          </p>
+          <div className="space-y-1">
+            {k.citations.map((cite: any, i: number) => (
+              <a
+                key={i}
+                href={cite.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 text-[11px] hover:underline group"
+              >
+                <span
+                  className="w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{ background: cite.isTrusted ? '#10B981' : '#A8A29E' }}
+                  title={cite.isTrusted ? t('knowledge.trusted') : t('knowledge.general')}
+                />
+                <span className="font-medium text-stone-700 truncate flex-1">{cite.title}</span>
+                <span className="text-stone-400 font-mono shrink-0">{cite.domain}</span>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Disclaimer */}
+      {!isLoading && (
+        <div className="px-4 py-2 bg-amber-50 border-t border-amber-100">
+          <p className="text-[10px] text-amber-800 leading-tight">{t('knowledge.disclaimer')}</p>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function TurnCard({ turn, primary, t }: { turn: Turn; primary: string; t: (k: string) => string }) {
   const isUser = turn.role === 'user';
@@ -1511,7 +1970,7 @@ function EmptyState({ tenant, primary, secondary, isDemoUser, t }: any) {
 
 /* ─────────── Settings Modal ─────────── */
 
-function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, settings, updateSettings, locale, setLocale, t }: any) {
+function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, settings, updateSettings, locale, setLocale, t, headsetIsActive, isDemoUser: isDemoUserFromProps }: any) {
   return (
     <div className="fixed inset-0 z-50 bg-stone-900/30 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div className="bg-white sm:rounded-3xl rounded-t-3xl max-w-md w-full max-h-[90vh] overflow-y-auto shadow-2xl">
@@ -1539,6 +1998,18 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, setti
             primary={primary}
             t={t}
           />
+
+          {/* Headset Media-Keys: nur für echte User (Demo nutzt Web Speech,
+              hat keine OpenAI-Realtime-Session zum togglen). */}
+          {!isDemoUserFromProps && (
+            <HeadsetSetting
+              value={settings.headsetMediaKeys}
+              onChange={(v: boolean) => updateSettings({ headsetMediaKeys: v })}
+              primary={primary}
+              t={t}
+              isActive={headsetIsActive}
+            />
+          )}
 
           <section>
             <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
@@ -1879,6 +2350,61 @@ function ToolsListSetting({ tools, primary, t }: any) {
           );
         })}
       </div>
+    </section>
+  );
+}
+
+/* ─────────── Headset Media-Keys Toggle ─────────── */
+
+function HeadsetSetting({ value, onChange, primary, t, isActive }: any) {
+  return (
+    <section>
+      <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 1a9 9 0 0 0-9 9v7c0 1.66 1.34 3 3 3h3v-8H5v-2a7 7 0 0 1 14 0v2h-4v8h3c1.66 0 3-1.34 3-3v-7a9 9 0 0 0-9-9z"/>
+        </svg>
+        {t('settings.headset.title')}
+      </h4>
+      <p className="text-[11px] text-stone-500 mb-2 leading-relaxed">
+        {t('settings.headset.desc')}
+      </p>
+      <button
+        onClick={() => onChange(!value)}
+        className="w-full p-3 rounded-2xl border-2 transition flex items-center gap-3 text-left"
+        style={{
+          borderColor: value ? primary : '#E7E5E4',
+          background: value ? `${primary}10` : '#FAFAF9',
+        }}
+      >
+        {/* Toggle Switch */}
+        <div
+          className="relative w-10 h-6 rounded-full transition shrink-0"
+          style={{ background: value ? primary : '#D6D3D1' }}
+        >
+          <div
+            className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-sm transition-transform"
+            style={{ transform: value ? 'translateX(18px)' : 'translateX(2px)' }}
+          />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-stone-800">
+            {value ? t('settings.headset.on') : t('settings.headset.off')}
+          </p>
+          {value && isActive && (
+            <p className="text-[11px] text-emerald-600 mt-0.5 font-medium">
+              ● {t('settings.headset.activeStatus')}
+            </p>
+          )}
+          {value && !isActive && (
+            <p className="text-[11px] text-stone-400 mt-0.5">
+              {t('settings.headset.pendingActivation')}
+            </p>
+          )}
+        </div>
+      </button>
+      <p className="text-[10px] text-stone-400 mt-2 leading-relaxed">
+        {t('settings.headset.hint')}
+      </p>
     </section>
   );
 }

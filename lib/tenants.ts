@@ -7,6 +7,13 @@ import { readFileSync, readdirSync } from 'fs';
 import path from 'path';
 import yaml from 'js-yaml';
 
+export interface TenantToolParameter {
+  name: string;
+  type: 'string' | 'number' | 'boolean';
+  required?: boolean;
+  description?: string;
+}
+
 export interface TenantTool {
   id: string;
   label: string;
@@ -16,6 +23,7 @@ export interface TenantTool {
   mcp_server?: string;
   enabled_for_roles: string[];
   require_confirmation?: boolean;
+  parameters?: TenantToolParameter[];
 }
 
 export interface TenantConfig {

@@ -34,6 +34,7 @@ export interface UserSettings {
   listenTimeoutSec: number;         // 3-60
   vadSensitivity: VadSensitivity;
   agentName: string;                // Default "Anni" - Trigger-Wort für Modus-Wechsel
+  headsetMediaKeys: boolean;        // Bluetooth-Headset Play/Pause-Taste → Voice-Button
 }
 
 export const DEFAULT_AGENT_NAME = 'Anni';
@@ -43,6 +44,7 @@ const DEFAULT_SETTINGS: UserSettings = {
   listenTimeoutSec: 10,
   vadSensitivity: 'normal',
   agentName: DEFAULT_AGENT_NAME,
+  headsetMediaKeys: true,           // Default an - keine Nachteile wenn kein Headset
 };
 
 export const LISTEN_TIMEOUT_MIN = 3;
@@ -96,6 +98,10 @@ function loadSettings(): UserSettings {
         typeof parsed.agentName === 'string' && /^[\p{L}\s'-]{1,30}$/u.test(parsed.agentName.trim())
           ? parsed.agentName.trim()
           : DEFAULT_AGENT_NAME,
+      headsetMediaKeys:
+        typeof parsed.headsetMediaKeys === 'boolean'
+          ? parsed.headsetMediaKeys
+          : DEFAULT_SETTINGS.headsetMediaKeys,
     };
   } catch {
     return DEFAULT_SETTINGS;

@@ -72,61 +72,88 @@ function buildSystemPrompt(
 Verfügbare Tools für deine Rolle:
 ${toolDescriptions}
 
-Nutze die Tools selbständig, wenn der Nutzer eine Anfrage stellt, die zu einem Tool passt.
-Bestätige Tool-Aufrufe verbal kurz und prägnant.
+# Tool-Aufrufe — IMMER mit Bestätigung
 
-# ÜBERSETZUNGSMODUS - Aktivierung
+WICHTIG: Bevor du ein **schreibendes** Tool aufrufst (alles was Daten einträgt,
+dokumentiert, eine Benachrichtigung sendet, einen Termin setzt etc.):
 
-Du hast ein Tool "start_translation_mode" für Dolmetscher-Anfragen.
+1. Fasse strukturiert zusammen WAS du gleich tun wirst.
+   Beispiel: "Ich dokumentiere folgenden Einsatz bei Frau Müller: Heute 14:30,
+   Klage über starke Schmerzen, Ibuprofen 400mg gegeben. Soll ich das so eintragen?"
+2. Frage den Nutzer ausdrücklich nach Bestätigung ("Ja, eintragen" / "Nein, korrigieren").
+3. RUF DAS TOOL ERST AUF wenn der Nutzer "Ja", "Bestätige", "Ok" oder gleichwertig sagt.
+   Bei "Nein" oder Korrektur: passe an und frage erneut.
 
-WICHTIG: Der Nutzer muss seinen Befehl IMMER mit "${agentName}" beginnen, sonst keine Aktion.
-Nur "${agentName} Übersetzung starten" / "${agentName} translation mode" / "${agentName} Dolmetscher" usw.
-zählen als Aktivierungs-Befehl. Ein "Übersetzung starten" ohne "${agentName}" davor IGNORIERST du
-und behandelst es wie normale Konversation.
+Lese-Tools (Informationen nachschlagen, Pflegewissen abrufen, Status prüfen)
+darfst du DIREKT aufrufen ohne Bestätigung - dort gibt es nichts rückgängig zu machen.
+Sage dabei aber kurz WAS du nachschlägst.
 
-## PFAD A: Sprache wurde direkt genannt
-Beispiele:
-- "${agentName}, übersetze ins Polnische"
-- "${agentName} translation to English"
-- "${agentName} Dolmetscher für Türkisch"
-→ Rufe SOFORT start_translation_mode mit der genannten Sprache auf. KEINE verbale Antwort vorher.
+# Übersetzungsmodus
 
-## PFAD B: Sprache fehlt
-Beispiele:
-- "${agentName}, Übersetzung starten"
-- "${agentName} Dolmetscher"
-- "${agentName} translation mode"
-→ Frage genau einmal kurz: "In welche Sprache?"
-→ SOBALD der Nutzer eine Sprache nennt (z.B. nur das Wort "Polnisch", "Polish", "Türkisch"),
-   rufe SOFORT start_translation_mode mit dieser Sprache auf.
-→ Wenn der Nutzer sagt "weiß ich nicht", "unbekannt", "no idea":
-   rufe start_translation_mode mit targetLanguage="unknown" auf.
-→ KEINE Bestätigung wie "Okay". Sofort Tool aufrufen.
+Du hast Tools start_translation_mode und stop_translation_mode für Dolmetscher-Anfragen.
 
-## WICHTIG
-- Nach dem Tool-Aufruf wird das System auf Übersetzungsmodus umschalten.
-- Du sollst NICHT die Übersetzung selbst machen - das Tool macht das.
-- Nach "In welche Sprache?" und der Antwort des Users ist die NÄCHSTE Aktion IMMER der Tool-Aufruf.
-- Mache niemals zwei Nachfragen hintereinander.
+## Aktivierung
+Wenn der Nutzer eine Übersetzung möchte ("Übersetzung starten", "translation mode",
+"Dolmetscher", "ins Polnische übersetzen" etc.), rufe start_translation_mode auf.
+
+- Sprache direkt mitgenannt: SOFORT start_translation_mode aufrufen, keine Rückfrage.
+- Sprache fehlt: einmal kurz "In welche Sprache?" fragen, dann beim nächsten Input
+  (z.B. nur das Wort "Polnisch") SOFORT start_translation_mode aufrufen.
+- Sprache unbekannt ("weiß ich nicht"): start_translation_mode mit targetLanguage="unknown".
+- Keine verbale Bestätigung wie "Okay, ich übersetze". Sofort Tool.
+
+## Beendigung
+Wenn der Nutzer den Modus beenden möchte ("Übersetzung beenden", "stop translation",
+"Dolmetscher aus" etc.), rufe stop_translation_mode auf.
+
+## Wichtige Hinweise zum Übersetzungsmodus
+- Übersetzungs-Aktivierungs/Stop-Befehle brauchen KEINE Bestätigung. Direkt aufrufen.
+- Mache niemals zwei Nachfragen hintereinander beim Aktivieren.
+- Die eigentliche Übersetzung machst du nicht - das Tool aktiviert einen separaten Modus.
 
 WICHTIG: ${langInstruction} Antworte immer auf ${langName}.`;
 }
 
 function buildToolSchema(tools: TenantTool[]): any[] {
-  return tools.map(tool => ({
-    type: 'function',
-    name: tool.id,
-    description: tool.description,
-    parameters: {
-      type: 'object',
-      properties: {
-        input: {
-          type: 'string',
-          description: 'Free-form input für dieses Tool',
+  return tools.map(tool => {
+    // Falls Tool-Definition Parameters hat: strukturierte Object-Form
+    if (tool.parameters && tool.parameters.length > 0) {
+      const properties: Record<string, any> = {};
+      const required: string[] = [];
+      for (const p of tool.parameters) {
+        properties[p.name] = {
+          type: p.type,
+          description: p.description || `${p.name} für ${tool.label}`,
+        };
+        if (p.required) required.push(p.name);
+      }
+      return {
+        type: 'function',
+        name: tool.id,
+        description: tool.description,
+        parameters: {
+          type: 'object',
+          properties,
+          ...(required.length > 0 ? { required } : {}),
+        },
+      };
+    }
+    // Fallback: Free-form Input
+    return {
+      type: 'function',
+      name: tool.id,
+      description: tool.description,
+      parameters: {
+        type: 'object',
+        properties: {
+          input: {
+            type: 'string',
+            description: 'Free-form input für dieses Tool',
+          },
         },
       },
-    },
-  }));
+    };
+  });
 }
 
 /**
@@ -134,17 +161,39 @@ function buildToolSchema(tools: TenantTool[]): any[] {
  * Wird als Funktion gebaut, weil die Tool-Description den User-konfigurierten
  * Agent-Namen als Trigger enthält.
  */
-function buildSystemTools(agentName: string): any[] {
+function buildSystemTools(_agentName: string): any[] {
   return [
+    {
+      type: 'function',
+      name: 'lookup_pflegewissen',
+      description:
+        'Schlägt Pflege- oder Medizin-Wissen aus vertrauenswürdigen Online-Quellen nach ' +
+        '(RKI, BfArM, Leitlinien, Gesundheitsportal Bund, Ärzteblatt etc.). ' +
+        'Aufrufen wenn der Nutzer eine fachliche Frage stellt, die Wissen über ' +
+        'Krankheitsbilder, Pflegemaßnahmen, Wirkstoffe, Leitlinien, Hygiene, etc. erfordert. ' +
+        'Beispiele: "Wie behandelt man Dekubitus Grad 2?", "Wechselwirkungen von Marcumar?", ' +
+        '"Maßnahmen bei MRSA-Verdacht?". ' +
+        'Das Tool antwortet mit Text und Quellen-Citations - sage dem Nutzer kurz WAS du nachschlägst.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Die Frage in eigenen Worten formuliert (Deutsch oder App-Sprache).',
+          },
+        },
+        required: ['query'],
+      },
+    },
     {
       type: 'function',
       name: 'start_translation_mode',
       description:
-        `Aktiviert den bidirektionalen Dolmetscher-Modus. WICHTIG: Nur aufrufen wenn der Nutzer "${agentName}" als Prefix nennt. ` +
-        `Beispiele: "${agentName} Übersetzung starten", "${agentName} translation mode", "${agentName} ins Polnische übersetzen". ` +
-        'Ohne Prefix wird der Befehl IGNORIERT - dann normale Konversation. ' +
+        'Aktiviert den bidirektionalen Dolmetscher-Modus. ' +
+        'Aufrufen wenn der Nutzer eine Übersetzungs-Anfrage stellt ("Übersetzung starten", ' +
+        '"translation mode", "Dolmetscher", "ins Polnische übersetzen" etc.). ' +
         'WANN AUFRUFEN: (1) Direkt wenn Nutzer eine Sprache nennt zusammen mit Übersetzungs-Wunsch ' +
-        `("${agentName} Übersetze ins Polnische") - sofort aufrufen. (2) Nach einer Rückfrage "In welche Sprache?" ` +
+        '("Übersetze ins Polnische") - sofort aufrufen. (2) Nach einer Rückfrage "In welche Sprache?" ' +
         'sobald der Nutzer eine Sprache nennt - sofort aufrufen, NICHT weiter unterhalten. ' +
         'targetLanguage: Sprache als deutsches/englisches Wort ("Polnisch", "Polish", "Türkisch"). ' +
         'Falls Nutzer Sprache nicht kennt: "unknown".',
@@ -164,10 +213,9 @@ function buildSystemTools(agentName: string): any[] {
       name: 'stop_translation_mode',
       description:
         'Beendet den Übersetzungsmodus und kehrt zum Normalmodus zurück. ' +
-        `Nur aufrufen wenn der Nutzer "${agentName}" als Prefix kombiniert mit einem Stop-Verb sagt. ` +
-        `Beispiele: "${agentName} Übersetzung beenden", "${agentName} stop translation", "${agentName} stoppen", ` +
-        `"${agentName} fine traduzione", "${agentName} arrête la traduction", "${agentName} alto traducción". ` +
-        'Ohne Prefix oder ohne Stop-Verb NICHT aufrufen - dann den Satz normal übersetzen.',
+        'Aufrufen wenn der Nutzer den Modus beenden möchte ("Übersetzung beenden", ' +
+        '"stop translation", "Dolmetscher aus", "fine traduzione", "arrête la traduction", ' +
+        '"alto traducción" etc.). Sofort aufrufen, keine Bestätigung nötig.',
       parameters: { type: 'object', properties: {} },
     },
   ];
