@@ -1080,13 +1080,14 @@ export default function VoiceApp({ tenant, user }: Props) {
         setVoiceState('recording');
 
         // DOPPEL-SICHERUNG: Tools und Instructions noch mal explizit per
-        // session.update setzen. Manchmal verwirft die Realtime-Beta-API
-        // die Tools die im REST-Endpoint mitgegeben wurden - dann redet
-        // das Modell ohne sie. Hier schieben wir sie nach.
+        // session.update setzen. Realtime-API verwirft manchmal die im REST-
+        // Endpoint mitgegebenen Tools - dann redet das Modell ohne sie.
+        // GA-Format: session muss { type: 'realtime', ... } sein.
         try {
           const updateMsg = {
             type: 'session.update',
             session: {
+              type: 'realtime',
               instructions: session.systemPrompt,
               tools: session.tools || [],
               tool_choice: 'auto',

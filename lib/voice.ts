@@ -300,31 +300,45 @@ export async function createVoiceSession(
     vadParams.silence_duration_ms = Math.max(vadParams.silence_duration_ms, 900);
   }
 
-  const response = await fetch('https://api.openai.com/v1/realtime/sessions', {
+  // OpenAI Realtime GA API (seit Mai 2026):
+  // - Endpoint zur Token-Erzeugung: /v1/realtime/client_secrets (statt /sessions)
+  // - WebRTC-Endpoint: /v1/realtime/calls (statt /realtime?model=)
+  // - Model: 'gpt-realtime' (statt 'gpt-4o-realtime-preview-2024-12-17')
+  // - Session-Config muss in { session: { type: 'realtime', ... } } gewrappt sein
+  // - voice/transcription/turn_detection unter audio.input.* und audio.output.*
+  // - KEIN 'OpenAI-Beta'-Header mehr
+  const sessionConfig = {
+    type: 'realtime',
+    model: 'gpt-realtime',
+    instructions: systemPrompt,
+    tools,
+    tool_choice: 'auto',
+    audio: {
+      input: {
+        transcription: { model: 'gpt-4o-mini-transcribe' },
+        noise_reduction: { type: 'near_field' },
+        turn_detection: {
+          type: 'server_vad',
+          threshold: vadParams.threshold,
+          prefix_padding_ms: vadParams.prefix_padding_ms,
+          silence_duration_ms: vadParams.silence_duration_ms,
+          create_response: true,
+        },
+      },
+      output: {
+        voice: effectiveVoiceId,
+      },
+    },
+  };
+
+  const response = await fetch('https://api.openai.com/v1/realtime/client_secrets', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'gpt-4o-realtime-preview-2024-12-17',
-      voice: effectiveVoiceId,
-      instructions: systemPrompt,
-      // Tools müssen hier mitgegeben werden, sonst kennt das Modell sie nicht
-      // und kann sie auch nicht aufrufen. Vorher fehlte das - deshalb hat
-      // das Modell auf "Übersetzung starten" nur dialogisch geantwortet,
-      // statt das Tool start_translation_mode aufzurufen.
-      tools,
-      tool_choice: 'auto',
-      input_audio_transcription: { model: 'gpt-4o-mini-transcribe' },
-      input_audio_noise_reduction: { type: 'near_field' },
-      turn_detection: {
-        type: 'server_vad',
-        threshold: vadParams.threshold,
-        prefix_padding_ms: vadParams.prefix_padding_ms,
-        silence_duration_ms: vadParams.silence_duration_ms,
-        create_response: true,
-      },
+      session: sessionConfig,
     }),
   });
 
@@ -335,10 +349,15 @@ export async function createVoiceSession(
 
   const session = await response.json();
 
+  // GA-API liefert das ephemeral secret im Feld 'value' (am Wurzel-Objekt,
+  // nicht mehr verschachtelt unter client_secret wie in der Beta).
+  const ephemeralToken = session.value || session.client_secret?.value;
+
   return {
     mode: 'webrtc',
-    endpoint: 'https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17',
-    ephemeralToken: session.client_secret?.value,
+    // WebRTC-Endpoint hat sich geändert - /calls statt /realtime
+    endpoint: 'https://api.openai.com/v1/realtime/calls?model=gpt-realtime',
+    ephemeralToken,
     systemPrompt,
     tools,
     voiceId: effectiveVoiceId,
