@@ -62,6 +62,22 @@ function isPersistable(turn: AnyTurn): boolean {
   if (turn.toolConfirmation?.status === 'pending') return false;
   // Loading Knowledge-Card: war mitten in API-Call. Nach Reload tot.
   if (turn.knowledge?.answer === '__loading__') return false;
+  // Leere Assistant-Turns (kein Text, keine Tool-Karten, keine Knowledge-Karte).
+  // Diese entstehen bei abgebrochenen Responses oder wenn ein Tool-Call statt
+  // einer Sprachantwort gemacht wurde. Sie zeigen sich als "ASSISTENT 14:20"
+  // ohne Inhalt - verwirrend für den Nutzer.
+  if (turn.role === 'assistant') {
+    const hasContent = (turn.text && turn.text.trim().length > 0) ||
+                       (turn.toolCalls && turn.toolCalls.length > 0) ||
+                       !!turn.knowledge ||
+                       !!turn.toolConfirmation ||
+                       !!turn.translation;
+    if (!hasContent) return false;
+  }
+  // Leere User-Turns mit "..." Placeholder die nie ein Transkript bekamen
+  if (turn.role === 'user' && (!turn.text || turn.text === '...' || turn.text === '…')) {
+    return false;
+  }
   return true;
 }
 

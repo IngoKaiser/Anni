@@ -56,6 +56,20 @@ interface Turn {
     citations: { url: string; title: string; domain: string; isTrusted: boolean }[];
     hasTrustedSources: boolean;
   };
+
+  /**
+   * System-Event-Bubble: Audit-Trail-Eintrag im Chat für nicht-konversationelle
+   * Ereignisse wie Modus-Wechsel oder erfolgreich durchgeführte Tool-Calls.
+   * Wird unterscheidbar von User/Assistant-Bubbles gerendert.
+   */
+  systemEvent?: {
+    /** Visuelle Kategorie - bestimmt Icon und Farbe */
+    kind: 'translator_start' | 'translator_stop' | 'tool_executed' | 'tool_cancelled';
+    /** Kurztext (wird als Bubble-Inhalt angezeigt) */
+    message: string;
+    /** Optional: strukturierte Details die unter dem Kurztext aufklappbar sind */
+    details?: string;
+  };
 }
 
 interface User {
@@ -438,6 +452,32 @@ export default function VoiceApp({ tenant, user }: Props) {
     streamRef.current = null;
     audioElRef.current = null;
     setAudioLevel(0);
+
+    // Geister-Turns entfernen: falls die aktuelle Antwort gerade gestreamt wurde
+    // (Turn erstellt, aber kein Text angekommen weil das Modell einen Tool-Call
+    // statt einer Sprachantwort gemacht hat), wird der Turn jetzt eingesammelt.
+    // Auch leere User-Turns (Speech-Started kam, aber nie ein Transkript).
+    const userTurnId = currentUserTurnRef.current?.id;
+    const assistantTurnId = currentAssistantTurnRef.current?.id;
+    if (userTurnId !== undefined || assistantTurnId !== undefined) {
+      setTurns(prev => prev.filter(t => {
+        if (t.id === assistantTurnId) {
+          const hasContent = (t.text && t.text.trim().length > 0) ||
+                             (t.toolCalls && t.toolCalls.length > 0) ||
+                             !!t.knowledge ||
+                             !!t.toolConfirmation;
+          return hasContent;
+        }
+        if (t.id === userTurnId) {
+          return !!(t.text && t.text !== '...' && t.text !== '…');
+        }
+        return true;
+      }));
+    }
+    currentUserTurnRef.current = null;
+    currentAssistantTurnRef.current = null;
+    activeResponseIdRef.current = null;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /**
@@ -555,14 +595,13 @@ export default function VoiceApp({ tenant, user }: Props) {
     if (!p) return;
     debugAdd(`✓ confirmed: ${p.toolLabel}`);
 
-    // Card auf "confirmed" setzen
+    // Bestätigungs-Card erstmal auf "confirmed" setzen (User-Feedback)
     setTurns(prev => prev.map(t =>
       t.id === p.cardTurnId && t.toolConfirmation
         ? { ...t, toolConfirmation: { ...t.toolConfirmation, status: 'confirmed' } }
         : t
     ));
 
-    // Tool jetzt ausführen
     fetch('/api/tools/execute', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -570,7 +609,6 @@ export default function VoiceApp({ tenant, user }: Props) {
     })
       .then(r => r.json())
       .then((data: any) => {
-        // Modell informieren
         const dc = dcRef.current;
         if (dc && dc.readyState === 'open' && p.callId) {
           dc.send(JSON.stringify({
@@ -583,6 +621,27 @@ export default function VoiceApp({ tenant, user }: Props) {
           }));
           dc.send(JSON.stringify({ type: 'response.create' }));
         }
+
+        // Audit-Bubble nach erfolgreichem Tool-Run: kompakte System-Zeile mit
+        // dem was getan wurde. Ersetzt die große ConfirmCard durch eine
+        // schlankere Darstellung damit der Chat-Verlauf übersichtlich bleibt.
+        setTimeout(() => {
+          // Confirm-Card entfernen (oder ersetzen) und stattdessen System-Bubble
+          setTurns(prev => {
+            const filtered = prev.filter(t => t.id !== p.cardTurnId);
+            return [...filtered, {
+              id: ++idCounter.current,
+              role: 'system',
+              text: '',
+              timestamp: Date.now(),
+              systemEvent: {
+                kind: 'tool_executed',
+                message: p.toolLabel,
+                details: p.summary,
+              },
+            }];
+          });
+        }, 400); // 400ms damit der User kurz die grüne Bestätigung sieht bevor sie zur Bubble wird
       })
       .catch((err: any) => {
         debugAdd(`tool exec failed: ${err?.message}`);
@@ -601,6 +660,7 @@ export default function VoiceApp({ tenant, user }: Props) {
     if (!p) return;
     debugAdd(`✗ cancelled: ${p.toolLabel}`);
 
+    // Card kurz auf "cancelled" zeigen
     setTurns(prev => prev.map(t =>
       t.id === p.cardTurnId && t.toolConfirmation
         ? { ...t, toolConfirmation: { ...t.toolConfirmation, status: 'cancelled' } }
@@ -612,6 +672,23 @@ export default function VoiceApp({ tenant, user }: Props) {
       p.callId,
       'User cancelled this action. Ask the user how they would like to proceed or what should be corrected.'
     );
+
+    // Nach kurzer Anzeige der roten Cancel-Card durch System-Bubble ersetzen
+    setTimeout(() => {
+      setTurns(prev => {
+        const filtered = prev.filter(t => t.id !== p.cardTurnId);
+        return [...filtered, {
+          id: ++idCounter.current,
+          role: 'system',
+          text: '',
+          timestamp: Date.now(),
+          systemEvent: {
+            kind: 'tool_cancelled',
+            message: p.toolLabel,
+          },
+        }];
+      });
+    }, 400);
 
     setPendingTool(null);
   }, [pendingTool, debugAdd, sendToolRejection]);
@@ -675,13 +752,48 @@ export default function VoiceApp({ tenant, user }: Props) {
     // System-Tool: Translator beenden
     if (toolName === 'stop_translation_mode') {
       debugAdd('→ stop_translation_mode');
+      const lastTarget = translatorTarget;
+
+      // 1. Stop-Marker in der TRANSLATOR-Historie eintragen (vor Mode-Wechsel)
+      if (lastTarget) {
+        const langDisplay = lastTarget.nativeLabel || lastTarget.label;
+        const flag = lastTarget.flag || '🌐';
+        setTurns(prev => [...prev, {
+          id: ++idCounter.current,
+          role: 'system',
+          text: '',
+          timestamp: Date.now(),
+          systemEvent: {
+            kind: 'translator_stop',
+            message: t('systemEvent.translatorStopped', { language: `${flag} ${langDisplay}` }),
+          },
+        }]);
+      }
+
       cleanupRealtime();
       setTranslatorActive(false);
       setTranslatorTarget(null);
-      // setTurns([]) hier WEGGELASSEN: durch den Mode-Wechsel lädt der
-      // useTurnHistory-Hook automatisch die Standard-Historie neu.
-      // Die Translator-Historie bleibt im localStorage erhalten.
+      // Mode-Wechsel: useTurnHistory lädt nun automatisch die Standard-Historie.
       setVoiceState('idle');
+
+      // 2. Bestätigungs-Marker in der STANDARD-Historie einfügen (nach Mode-Wechsel)
+      // Klein verzögert damit der History-Hook bereits umgestellt hat.
+      if (lastTarget) {
+        const langDisplay = lastTarget.nativeLabel || lastTarget.label;
+        const flag = lastTarget.flag || '🌐';
+        setTimeout(() => {
+          setTurns(prev => [...prev, {
+            id: ++idCounter.current,
+            role: 'system',
+            text: '',
+            timestamp: Date.now(),
+            systemEvent: {
+              kind: 'translator_stop',
+              message: t('systemEvent.translatorStopped', { language: `${flag} ${langDisplay}` }),
+            },
+          }]);
+        }, 150);
+      }
       return;
     }
 
@@ -848,6 +960,19 @@ export default function VoiceApp({ tenant, user }: Props) {
           }));
           dc.send(JSON.stringify({ type: 'response.create' }));
         }
+        // Audit-Bubble: bei Lese-Tools mit Args zeigen wir kompakt was nachgeschlagen wurde
+        const summary = formatToolArgsAsSummary(args);
+        setTurns(prev => [...prev, {
+          id: ++idCounter.current,
+          role: 'system',
+          text: '',
+          timestamp: Date.now(),
+          systemEvent: {
+            kind: 'tool_executed',
+            message: tool.label,
+            details: summary || undefined,
+          },
+        }]);
       })
       .catch((err: any) => {
         debugAdd(`tool ${toolName} failed: ${err?.message}`);
@@ -1131,8 +1256,24 @@ export default function VoiceApp({ tenant, user }: Props) {
         });
         // Translator-Historie ist separat persistiert (in localStorage),
         // wird durch den useTurnHistory-Mode-Wechsel automatisch geladen.
-        // Wir setzen turns NICHT manuell auf [] - das würde die persistierte
-        // Translator-History überschreiben sobald der Hook re-syncs.
+
+        // Audit-Trail-Bubble in der NEUEN Historie (Translator-Mode).
+        // Wir nutzen einen Mini-Delay damit der History-Hook erst auf den
+        // neuen Mode umstellt - sonst landet die Bubble in der Standard-History.
+        const langDisplay = session.targetLanguageNative || session.targetLanguage;
+        const flag = session.targetLanguageFlag || '🌐';
+        setTimeout(() => {
+          setTurns(prev => [...prev, {
+            id: ++idCounter.current,
+            role: 'system',
+            text: '',
+            timestamp: Date.now(),
+            systemEvent: {
+              kind: 'translator_start',
+              message: t('systemEvent.translatorStarted', { language: `${flag} ${langDisplay}` }),
+            },
+          }]);
+        }, 100);
       }
 
       const ephemeralKey = session.ephemeralToken;
@@ -1277,11 +1418,21 @@ export default function VoiceApp({ tenant, user }: Props) {
     }
   };
 
+  // Ref auf headset.activate damit handleTap aufrufen kann ohne Closure-Probleme.
+  // Wird unten gefüllt nachdem useHeadsetMediaKeys initialisiert wurde.
+  const headsetActivateRef = useRef<(() => void) | null>(null);
+
   // ─────────── Unified Tap-Handler ───────────
   const handleTap = () => {
     // iOS Speech-Engine entsperren - muss synchron im Touch-Event passieren.
     if (isDemoUser) {
       speech.primeForUserInteraction();
+    }
+    // Headset-Steuerung beim ersten Tap explizit aktivieren - der document-Listener
+    // im Hook kann manchmal verpassen (z.B. wenn der erste Tap programmatisch
+    // ausgelöst wird). Doppelter Aufruf schadet nicht (idempotent).
+    if (!isDemoUser && headsetActivateRef.current) {
+      headsetActivateRef.current();
     }
 
     if (isDemoUser) {
@@ -1329,6 +1480,9 @@ export default function VoiceApp({ tenant, user }: Props) {
     voiceState,
     enabled: settings.headsetMediaKeys && !isDemoUser, // Demo nutzt Web Speech, hat eigenes Audio
   });
+
+  // headsetActivateRef befüllen damit handleTap das aktivieren kann
+  useEffect(() => { headsetActivateRef.current = headset.activate; }, [headset.activate]);
 
   const handleLogout = async () => {
     await signOut({ callbackUrl: '/login' });
@@ -1397,12 +1551,43 @@ export default function VoiceApp({ tenant, user }: Props) {
           </div>
           <button
             onClick={() => {
+              const lastTarget = translatorTarget;
+              // System-Bubble in der Translator-Historie
+              if (lastTarget) {
+                const langDisplay = lastTarget.nativeLabel || lastTarget.label;
+                const flag = lastTarget.flag || '🌐';
+                setTurns(prev => [...prev, {
+                  id: ++idCounter.current,
+                  role: 'system',
+                  text: '',
+                  timestamp: Date.now(),
+                  systemEvent: {
+                    kind: 'translator_stop',
+                    message: t('systemEvent.translatorStopped', { language: `${flag} ${langDisplay}` }),
+                  },
+                }]);
+              }
               cleanupRealtime();
               setTranslatorActive(false);
               setTranslatorTarget(null);
-              // Translator-Historie bleibt im localStorage erhalten, wird beim
-              // Wiedereinstieg in den Modus geladen.
               setVoiceState('idle');
+              // System-Bubble auch in der Standard-Historie
+              if (lastTarget) {
+                const langDisplay = lastTarget.nativeLabel || lastTarget.label;
+                const flag = lastTarget.flag || '🌐';
+                setTimeout(() => {
+                  setTurns(prev => [...prev, {
+                    id: ++idCounter.current,
+                    role: 'system',
+                    text: '',
+                    timestamp: Date.now(),
+                    systemEvent: {
+                      kind: 'translator_stop',
+                      message: t('systemEvent.translatorStopped', { language: `${flag} ${langDisplay}` }),
+                    },
+                  }]);
+                }, 150);
+              }
             }}
             className="px-3 py-1.5 rounded-full bg-white/20 hover:bg-white/30 backdrop-blur text-white text-xs font-medium transition flex items-center gap-1.5 shrink-0"
           >
@@ -1519,28 +1704,52 @@ export default function VoiceApp({ tenant, user }: Props) {
         ) : (
           translatorActive
             ? renderTranslatorTurns(turns, locale, translatorTarget, t)
-            : turns.map(turn => {
-                // Tool-Bestätigung
-                if (turn.toolConfirmation) {
-                  return (
-                    <ToolConfirmCard
-                      key={turn.id}
-                      turn={turn}
-                      primary={primary}
-                      t={t}
-                      onConfirm={confirmPendingTool}
-                      onCancel={cancelPendingTool}
-                      isPending={pendingTool?.cardTurnId === turn.id}
-                    />
-                  );
-                }
-                // Wissens-Card
-                if (turn.knowledge) {
-                  return <KnowledgeCard key={turn.id} turn={turn} primary={primary} t={t} />;
-                }
-                // Standard Turn
-                return <TurnCard key={turn.id} turn={turn} primary={primary} t={t} />;
-              })
+            : turns
+                // Leere Assistant-Turns ausblenden (während Streaming-Start
+                // kurz leer, oder bei abgebrochenen Responses). Wir zeigen
+                // sie nur wenn sie auch tatsächlich Inhalt haben - oder
+                // wenn der State gerade "responding" ist und es der aktive
+                // Turn ist (sonst flackert die Anzeige).
+                .filter(turn => {
+                  if (turn.role !== 'assistant') return true;
+                  if (turn.text && turn.text.length > 0) return true;
+                  if (turn.toolCalls && turn.toolCalls.length > 0) return true;
+                  if (turn.toolConfirmation || turn.knowledge) return true;
+                  // Aktiv-Antwortender Turn: zeigen damit der User sieht
+                  // dass die Antwort generiert wird (sonst wirkt es als
+                  // hätte Anni nichts getan)
+                  if (voiceState === 'responding' &&
+                      currentAssistantTurnRef.current?.id === turn.id) {
+                    return true;
+                  }
+                  return false;
+                })
+                .map(turn => {
+                  // Tool-Bestätigung
+                  if (turn.toolConfirmation) {
+                    return (
+                      <ToolConfirmCard
+                        key={turn.id}
+                        turn={turn}
+                        primary={primary}
+                        t={t}
+                        onConfirm={confirmPendingTool}
+                        onCancel={cancelPendingTool}
+                        isPending={pendingTool?.cardTurnId === turn.id}
+                      />
+                    );
+                  }
+                  // Wissens-Card
+                  if (turn.knowledge) {
+                    return <KnowledgeCard key={turn.id} turn={turn} primary={primary} t={t} />;
+                  }
+                  // System-Event-Bubble (Audit-Trail im Chat)
+                  if (turn.systemEvent) {
+                    return <SystemEventBubble key={turn.id} turn={turn} primary={primary} t={t} />;
+                  }
+                  // Standard Turn
+                  return <TurnCard key={turn.id} turn={turn} primary={primary} t={t} />;
+                })
         )}
         <div ref={dialogEndRef} />
       </div>
@@ -1566,19 +1775,35 @@ export default function VoiceApp({ tenant, user }: Props) {
           {translatorActive ? (
             <p className="text-[11px] text-stone-400 mt-1">{t('translator.endHint')}</p>
           ) : (
-            <div className="flex items-center gap-1.5 mt-1">
+            <div className="flex items-center gap-1.5 mt-1 transition-all">
               <p className="text-[11px] text-stone-400">{t('ptt.hint')}</p>
-              {headset.isActive && (
+              {headset.isActive && headset.hasHeadset === true && (
+                // Headset konkret erkannt - grünes Badge mit optionalem Namen
                 <span
-                  className="text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700"
+                  className="text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 animate-in fade-in duration-300"
                   title={t('headset.activeHint')}
                 >
                   <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M12 1a9 9 0 0 0-9 9v7c0 1.66 1.34 3 3 3h3v-8H5v-2a7 7 0 0 1 14 0v2h-4v8h3c1.66 0 3-1.34 3-3v-7a9 9 0 0 0-9-9z"/>
                   </svg>
-                  {t('headset.active')}
+                  <span className="max-w-[120px] truncate">
+                    {headset.headsetName || t('headset.active')}
+                  </span>
                 </span>
               )}
+              {headset.isActive && headset.hasHeadset === null && (
+                // Status unbekannt (Permission fehlt) - dezent grau
+                <span
+                  className="text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-500"
+                  title={t('headset.unknownHint')}
+                >
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 1a9 9 0 0 0-9 9v7c0 1.66 1.34 3 3 3h3v-8H5v-2a7 7 0 0 1 14 0v2h-4v8h3c1.66 0 3-1.34 3-3v-7a9 9 0 0 0-9-9z"/>
+                  </svg>
+                  {t('headset.controlPossible')}
+                </span>
+              )}
+              {/* hasHeadset === false: KEIN Badge (laut Design-Entscheidung) */}
             </div>
           )}
         </div>
@@ -1598,6 +1823,8 @@ export default function VoiceApp({ tenant, user }: Props) {
           setLocale={setLocale}
           t={t}
           headsetIsActive={headset.isActive}
+          headsetHasDevice={headset.hasHeadset}
+          headsetDeviceName={headset.headsetName}
           isDemoUser={isDemoUser}
         />
       )}
@@ -1855,6 +2082,47 @@ function KnowledgeCard({ turn, primary, t }: any) {
   );
 }
 
+/* ─────────── System-Event-Bubble (Audit-Trail im Chat) ─────────── */
+
+function SystemEventBubble({ turn, primary, t }: { turn: Turn; primary: string; t: (k: string) => string }) {
+  const ev = turn.systemEvent;
+  if (!ev) return null;
+
+  const time = new Date(turn.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+
+  // Visuelle Variante je Kind
+  const styles: Record<string, { icon: string; bg: string; border: string; text: string; iconColor: string }> = {
+    translator_start: { icon: '🌐', bg: '#EEF2FF', border: '#C7D2FE', text: '#3730A3', iconColor: '#4F46E5' },
+    translator_stop: { icon: '✓', bg: '#F5F5F4', border: '#E7E5E4', text: '#57534E', iconColor: '#78716C' },
+    tool_executed: { icon: '✓', bg: '#F0FDF4', border: '#BBF7D0', text: '#166534', iconColor: '#059669' },
+    tool_cancelled: { icon: '✕', bg: '#FFF1F2', border: '#FECDD3', text: '#9F1239', iconColor: '#E11D48' },
+  };
+  const s = styles[ev.kind] || styles.tool_executed;
+
+  return (
+    <div className="flex justify-center my-1">
+      <div
+        className="max-w-[90%] rounded-full px-3 py-1.5 flex items-center gap-2 text-[11px]"
+        style={{
+          background: s.bg,
+          border: `1px solid ${s.border}`,
+          color: s.text,
+        }}
+      >
+        <span className="font-semibold" style={{ color: s.iconColor }}>{s.icon}</span>
+        <span className="font-medium leading-tight">{ev.message}</span>
+        {ev.details && (
+          <details className="cursor-pointer">
+            <summary className="text-[10px] opacity-60 ml-1 select-none">{t('systemEvent.showDetails')}</summary>
+            <pre className="text-[10px] mt-1 ml-1 whitespace-pre-wrap font-sans opacity-80">{ev.details}</pre>
+          </details>
+        )}
+        <span className="text-[9px] font-mono opacity-40 ml-1">{time}</span>
+      </div>
+    </div>
+  );
+}
+
 function TurnCard({ turn, primary, t }: { turn: Turn; primary: string; t: (k: string) => string }) {
   const isUser = turn.role === 'user';
   const time = new Date(turn.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
@@ -1940,48 +2208,58 @@ function TranslatorEmptyState({ sourceLocale, targetLabel, t }: any) {
  * ist die "Übersetzung". Wir gruppieren sie zu Paaren.
  */
 function renderTranslatorTurns(turns: Turn[], sourceLocale: string, target: any, t: (k: string, p?: any) => string) {
-  // Pairs bauen: jeder User-Turn startet einen neuen Pair, der nächste
-  // Assistant-Turn füllt ihn auf. Die Reihenfolge im Translator-Modus ist
-  // immer: User-Aussage → Übersetzung. Wenn zwei User-Turns hintereinander
-  // kommen (z.B. weil der Assistant noch lädt) wird das als zwei separate
-  // Pairs gerendert.
-  //
-  // Verwaiste Assistant-Turns (ohne vorhergehenden User-Turn) sollten im
-  // Translator-Modus durch den verschärften Prompt nicht mehr auftreten.
-  // Wenn sie doch mal kommen (z.B. weil das Modell trotzdem von sich aus
-  // was sagt), filtern wir sie raus - sie passen nicht ins Pärchen-Schema.
-  type Pair = { user: Turn | null; assistant: Turn | null };
-  const pairs: Pair[] = [];
-  let current: Pair = { user: null, assistant: null };
+  // Wir mischen Pairs (User+Assistant zusammengehörig) mit System-Events
+  // chronologisch. Konkret: bauen ein Array von Render-Elementen vom Typ
+  // 'pair' | 'system'. So bleibt die Reihenfolge erhalten, z.B.
+  // [pair1, system_start, pair2, pair3, system_stop].
+  type RenderItem =
+    | { kind: 'pair'; pair: { user: Turn | null; assistant: Turn | null } }
+    | { kind: 'system'; turn: Turn };
+
+  const items: RenderItem[] = [];
+  let current: { user: Turn | null; assistant: Turn | null } = { user: null, assistant: null };
+
+  const flushPair = () => {
+    if (current.user || current.assistant) {
+      items.push({ kind: 'pair', pair: current });
+      current = { user: null, assistant: null };
+    }
+  };
+
   for (const turn of turns) {
+    if (turn.systemEvent) {
+      flushPair();
+      items.push({ kind: 'system', turn });
+      continue;
+    }
     if (turn.role === 'user') {
-      if (current.user) pairs.push(current);
+      if (current.user) flushPair();
       current = { user: turn, assistant: null };
-    } else {
-      // assistant
+    } else if (turn.role === 'assistant') {
       if (current.user && !current.assistant) {
         current.assistant = turn;
-        pairs.push(current);
-        current = { user: null, assistant: null };
+        flushPair();
       } else if (current.user && current.assistant) {
-        // Schon ein Pärchen voll - der zweite Assistant-Output ist eine
-        // erweiterte/korrigierte Übersetzung. Wir verlängern den Text.
-        current = { user: null, assistant: null };
-        const last = pairs[pairs.length - 1];
-        if (last?.assistant) {
-          last.assistant = { ...last.assistant, text: last.assistant.text + ' ' + turn.text };
+        // Erweiterte Übersetzung - an letzten Pair anhängen
+        const last = items[items.length - 1];
+        if (last?.kind === 'pair' && last.pair.assistant) {
+          last.pair.assistant = { ...last.pair.assistant, text: last.pair.assistant.text + ' ' + turn.text };
         }
+        current = { user: null, assistant: null };
       }
       // Verwaiste Assistant-Turns ohne User-Vorgänger: ignorieren
     }
   }
-  if (current.user) pairs.push(current);
+  flushPair();
 
   return (
     <div className="space-y-3">
-      {pairs.map((pair, i) => (
-        <TranslatorPair key={i} pair={pair} sourceLocale={sourceLocale} target={target} t={t} />
-      ))}
+      {items.map((item, i) => {
+        if (item.kind === 'system') {
+          return <SystemEventBubble key={`sys-${item.turn.id}`} turn={item.turn} primary="#6366F1" t={t} />;
+        }
+        return <TranslatorPair key={`pair-${i}`} pair={item.pair} sourceLocale={sourceLocale} target={target} t={t} />;
+      })}
     </div>
   );
 }
@@ -2075,7 +2353,7 @@ function EmptyState({ tenant, primary, secondary, isDemoUser, t }: any) {
 
 /* ─────────── Settings Modal ─────────── */
 
-function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, settings, updateSettings, locale, setLocale, t, headsetIsActive, isDemoUser: isDemoUserFromProps }: any) {
+function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, settings, updateSettings, locale, setLocale, t, headsetIsActive, headsetHasDevice, headsetDeviceName, isDemoUser: isDemoUserFromProps }: any) {
   return (
     <div className="fixed inset-0 z-50 bg-stone-900/30 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div className="bg-white sm:rounded-3xl rounded-t-3xl max-w-md w-full max-h-[90vh] overflow-y-auto shadow-2xl">
@@ -2113,6 +2391,8 @@ function SettingsModal({ tenant, user, primary, onLogout, onClose, speech, setti
               primary={primary}
               t={t}
               isActive={headsetIsActive}
+              hasDevice={headsetHasDevice}
+              deviceName={headsetDeviceName}
             />
           )}
 
@@ -2461,7 +2741,13 @@ function ToolsListSetting({ tools, primary, t }: any) {
 
 /* ─────────── Headset Media-Keys Toggle ─────────── */
 
-function HeadsetSetting({ value, onChange, primary, t, isActive }: any) {
+function HeadsetSetting({ value, onChange, primary, t, isActive, hasDevice, deviceName }: any) {
+  // Status-Text-Logik (vier Fälle):
+  // - Off: User hat ausgeschaltet → grauer "Off"-Text
+  // - On + isActive + hasDevice===true: grünes "AirPods verbunden"
+  // - On + isActive + hasDevice===null: graue "Steuerung möglich (Gerät nicht erkennbar)"
+  // - On + isActive + hasDevice===false: amber "Kein Headset verbunden"
+  // - On + !isActive: pending
   return (
     <section>
       <h4 className="text-xs uppercase tracking-wider text-stone-500 font-semibold mb-2 flex items-center gap-1.5">
@@ -2481,7 +2767,6 @@ function HeadsetSetting({ value, onChange, primary, t, isActive }: any) {
           background: value ? `${primary}10` : '#FAFAF9',
         }}
       >
-        {/* Toggle Switch */}
         <div
           className="relative w-10 h-6 rounded-full transition shrink-0"
           style={{ background: value ? primary : '#D6D3D1' }}
@@ -2495,8 +2780,18 @@ function HeadsetSetting({ value, onChange, primary, t, isActive }: any) {
           <p className="text-sm font-semibold text-stone-800">
             {value ? t('settings.headset.on') : t('settings.headset.off')}
           </p>
-          {value && isActive && (
-            <p className="text-[11px] text-emerald-600 mt-0.5 font-medium">
+          {value && isActive && hasDevice === true && (
+            <p className="text-[11px] text-emerald-600 mt-0.5 font-medium truncate">
+              ● {deviceName ? t('settings.headset.deviceConnected', { name: deviceName }) : t('settings.headset.activeStatus')}
+            </p>
+          )}
+          {value && isActive && hasDevice === false && (
+            <p className="text-[11px] text-amber-600 mt-0.5 font-medium">
+              ○ {t('settings.headset.noDevice')}
+            </p>
+          )}
+          {value && isActive && hasDevice === null && (
+            <p className="text-[11px] text-stone-500 mt-0.5">
               ● {t('settings.headset.activeStatus')}
             </p>
           )}
