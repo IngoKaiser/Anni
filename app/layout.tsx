@@ -3,6 +3,7 @@ import { SessionProvider } from 'next-auth/react';
 import { headers } from 'next/headers';
 import { I18nProvider } from '@/lib/i18n';
 import { SUPPORTED_LOCALES, type Locale } from '@/lib/i18n-shared';
+import { PWARegistry } from '@/components/PWARegistry';
 
 export const metadata = {
   title: 'Anni - your personal assistant',
@@ -65,6 +66,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         <SessionProvider>
           <I18nProvider initialLocale={initialLocale}>
             {children}
+            <PWARegistry />
           </I18nProvider>
         </SessionProvider>
       </body>

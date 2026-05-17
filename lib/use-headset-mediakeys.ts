@@ -1,64 +1,54 @@
 'use client';
 
 /**
- * useHeadsetMediaKeys
+ * useHeadsetMediaKeys (v2)
  *
- * Macht den Tap-zum-Sprechen-Button vom Bluetooth-Headset (oder beliebigen
- * Media-Keys auf der Tastatur) steuerbar.
+ * Bluetooth-Headset Play/Pause-Tasten steuern den Voice-Button.
  *
- * # Wie das technisch funktioniert
+ * # Architektur
  *
- * Die Media Session API (navigator.mediaSession) lässt eine Web-App auf
- * Media-Key-Events reagieren — aber NUR wenn der Browser eine aktive
- * Audio-Quelle für diese Seite registriert hat. Ohne aktive Quelle sind
- * die Handler taub.
+ * Die Media Session API funktioniert nur wenn der Browser eine aktive Audio-
+ * Quelle erkennt. Wir spielen einen Silent-Loop (8 KB WAV, 1 Sekunde Stille
+ * in Endlos-Loop). Über `setActionHandler('play'/'pause', cb)` registrieren
+ * wir Handler die bei Headset-Tap aufgerufen werden.
  *
- * Trick: wir spielen eine STILLE Audio-Datei in Endlosschleife ab. Der
- * Browser registriert das als aktive Audio-Quelle und routet die
- * Media-Tasten an unsere Handler.
+ * # iOS Quirks - das was wir gelernt haben
  *
- * # iOS Safari Quirks
+ * 1. Audio braucht User-Geste. Erste Aktivierung erst nach Tap/Click.
+ * 2. Wenn WebRTC einen Audio-Stream öffnet (= unsere Realtime-Voice-Session),
+ *    übernimmt iOS die Audio-Session. Unser Silent-Loop wird verdrängt UND
+ *    iOS zeigt eine Toast-Notification "Steuerung mit AirPods nicht möglich".
+ * 3. Aber: die Media-Session-Handler bleiben aktiv und reagieren auf den
+ *    WebRTC-Stream als neue Source. ABER nur wenn wir den Handler in der
+ *    richtigen Phase setzen.
+ * 4. Nach Voice-Session-Ende muss der Silent-Loop wieder gestartet werden,
+ *    sonst gehen Folge-Taps verloren.
  *
- * - Audio muss durch User-Geste gestartet werden (kein Autoplay). Wir
- *   warten auf den ersten Tap irgendwo in der App und starten dann.
- * - Audio darf nicht "1ms" lang sein - manche Browser ignorieren das.
- *   Wir nehmen 1 Sekunde Stille in einer Loop.
- * - Manchmal greift der erste Play-Befehl nicht. Wir handhaben das
- *   indem wir bei Bedarf einen erneuten Versuch unternehmen.
+ * # Strategie
  *
- * # Logik der Tasten
- *
- * Das Headset sendet bei einem Klick auf die Mitteltaste einen
- * "joint command for play and pause". Der UA-Spec zufolge ruft das je
- * nach playbackState entweder den play- oder den pause-Handler auf.
- * Wir registrieren BEIDE und mappen beide auf onTap - so dass der User
- * mit einem Klick togglen kann (analog zum Tap-Button).
+ * - Beim ersten User-Tap: Silent-Loop starten + Handler registrieren
+ * - Bei voiceState 'recording'/'responding': Silent-Loop pausieren
+ *   (WebRTC übernimmt). Handler bleiben registriert.
+ * - Bei voiceState 'idle'/'error': Silent-Loop wieder starten
+ *   (WebRTC ist weg, wir müssen Audio-Session zurückerobern).
+ * - Handler werden bei JEDEM voiceState-Wechsel neu gesetzt - das umgeht
+ *   iOS-Bug wo Handler nach Audio-Session-Wechsel verloren gehen.
  */
 
 import { useEffect, useRef, useState } from 'react';
 
 interface UseHeadsetOptions {
-  /** Wird aufgerufen wenn der User den Media-Key drückt (Headset oder Tastatur) */
   onTap: () => void;
-  /** Aktueller Voice-State - wir leiten daraus den playbackState ab */
   voiceState: 'idle' | 'connecting' | 'recording' | 'processing' | 'responding' | 'error';
-  /** Feature-Flag: User kann das in Settings ausschalten */
   enabled?: boolean;
 }
 
 interface UseHeadsetResult {
-  /** True wenn Headset-Steuerung aktiv ist (Audio läuft, Handler registriert) */
   isActive: boolean;
-  /** Falls die Aktivierung fehlgeschlagen ist: Fehler-Beschreibung */
   error: string | null;
-  /** Manuelle Aktivierung - wird normalerweise automatisch bei erster Interaktion getriggert */
   activate: () => void;
 }
 
-// Silent-WAV (1 Sekunde Stille, 8 kHz, 8-bit PCM, ~8 KB) liegt als
-// public/silent.wav im Repo. Das wird vom Browser zuverlässig dekodiert.
-// Eine Data-URL hatten wir auch versucht aber WAV-Header korrekt in einer
-// Data-URL hinzubekommen ist fragil - File ist robuster.
 const SILENT_AUDIO_URL = '/silent.wav';
 
 export function useHeadsetMediaKeys(opts: UseHeadsetOptions): UseHeadsetResult {
@@ -67,98 +57,112 @@ export function useHeadsetMediaKeys(opts: UseHeadsetOptions): UseHeadsetResult {
   const [isActive, setIsActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Audio-Element für den Silent-Loop
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  // onTap als ref, damit useEffects nicht bei jeder onTap-Änderung re-laufen
   const onTapRef = useRef(onTap);
+  const voiceStateRef = useRef(voiceState);
   useEffect(() => { onTapRef.current = onTap; }, [onTap]);
+  useEffect(() => { voiceStateRef.current = voiceState; }, [voiceState]);
 
-  /**
-   * Initialisiert den Silent-Audio-Loop und die MediaSession-Handler.
-   * Idempotent - mehrfaches Aufrufen schadet nicht.
-   */
+  /** Silent-Loop sicher starten (idempotent) */
+  const startSilentLoop = async (): Promise<boolean> => {
+    if (!audioRef.current) return false;
+    try {
+      if (audioRef.current.paused) {
+        try { audioRef.current.currentTime = 0; } catch {}
+        await audioRef.current.play();
+      }
+      return true;
+    } catch (err) {
+      const e = err as Error;
+      if (e.name !== 'AbortError' && e.name !== 'NotAllowedError') {
+        console.warn('[headset] silent loop play failed:', e.message);
+      }
+      return false;
+    }
+  };
+
+  /** Silent-Loop pausieren */
+  const stopSilentLoop = () => {
+    if (!audioRef.current) return;
+    try {
+      audioRef.current.pause();
+    } catch {}
+  };
+
+  /** Action-Handler neu setzen. Bei jedem voiceState-Wechsel aufgerufen. */
+  const setHandlers = () => {
+    if (typeof navigator === 'undefined') return;
+    if (!('mediaSession' in navigator)) return;
+    try {
+      const handler = () => {
+        onTapRef.current();
+      };
+      navigator.mediaSession.setActionHandler('play', handler);
+      navigator.mediaSession.setActionHandler('pause', handler);
+      try {
+        navigator.mediaSession.setActionHandler('stop', handler);
+      } catch {}
+    } catch (err) {
+      setError(`Handler setzen fehlgeschlagen: ${(err as Error).message}`);
+    }
+  };
+
+  /** Initialisierung - läuft beim ersten User-Tap */
   const activate = () => {
     if (typeof window === 'undefined') return;
     if (!('mediaSession' in navigator)) {
-      setError('Media Session API not supported');
+      setError('Media Session API nicht unterstützt');
       return;
     }
     if (isActive) return;
     if (!enabled) return;
 
     try {
-      // Audio-Element erstellen falls noch nicht da
       if (!audioRef.current) {
         const audio = new Audio();
         audio.src = SILENT_AUDIO_URL;
         audio.loop = true;
-        audio.volume = 0; // Doppelt sicher - Silent-Data + volume=0
-        // playsinline ist auf iOS wichtig, sonst öffnet sich der Vollbild-Player
+        audio.volume = 0;
+        audio.preload = 'auto';
         audio.setAttribute('playsinline', 'true');
         audioRef.current = audio;
       }
 
-      // Audio starten. play() returnt eine Promise die rejecten kann
-      // (z.B. wenn kein User-Gesture vorausging).
-      const playPromise = audioRef.current.play();
-      if (playPromise && typeof playPromise.catch === 'function') {
-        playPromise.catch((err: Error) => {
-          // Bei AbortError ignorieren (passiert beim schnellen Toggle)
-          if (err.name === 'NotAllowedError') {
-            setError('User-Geste nötig - Headset-Steuerung wird beim ersten Tap aktiv');
-          } else if (err.name !== 'AbortError') {
-            setError(`Audio play failed: ${err.message}`);
-          }
-        });
-      }
-
-      // Metadata setzen - hilft manchen Browsern die Session korrekt zu
-      // identifizieren. Wir nutzen App-Branding statt Track-Info.
       navigator.mediaSession.metadata = new MediaMetadata({
         title: 'Voice Assistant',
         artist: 'Anni',
       });
 
-      // Handler für Play und Pause. Joint command vom Headset löst je nach
-      // playbackState einen der beiden aus - beide rufen onTap.
-      // Wir wrappen in try/catch weil setActionHandler auf manchen
-      // älteren Browsern werfen kann.
-      const handler = () => {
-        onTapRef.current();
-      };
-
-      try {
-        navigator.mediaSession.setActionHandler('play', handler);
-        navigator.mediaSession.setActionHandler('pause', handler);
-      } catch (err) {
-        setError(`Handler registration failed: ${(err as Error).message}`);
-        return;
-      }
-
-      // playbackState initial setzen
       navigator.mediaSession.playbackState = 'paused';
-      setIsActive(true);
-      setError(null);
+      setHandlers();
+
+      const isVoiceActive = voiceStateRef.current === 'recording' ||
+                            voiceStateRef.current === 'responding';
+      if (!isVoiceActive) {
+        startSilentLoop().then(success => {
+          if (success) {
+            setIsActive(true);
+            setError(null);
+          } else {
+            setError('Audio konnte nicht gestartet werden');
+          }
+        });
+      } else {
+        setIsActive(true);
+        setError(null);
+      }
     } catch (err) {
-      setError(`Activation failed: ${(err as Error).message}`);
+      setError(`Aktivierung fehlgeschlagen: ${(err as Error).message}`);
     }
   };
 
-  /**
-   * Bei erster User-Interaktion automatisch aktivieren.
-   * Browser-Restriktion: Audio darf erst nach einer Geste laufen.
-   */
+  /** Erst-Aktivierung bei erster User-Interaktion */
   useEffect(() => {
     if (!enabled) return;
     if (isActive) return;
 
-    const tryActivate = () => {
-      activate();
-    };
+    const tryActivate = () => activate();
 
-    // Auf alle möglichen Geste-Events hören (defensive Mehrfach-Listener).
-    // 'once' sorgt dafür dass jeder Listener nach dem ersten Trigger
-    // automatisch entfernt wird.
     const opts: AddEventListenerOptions = { once: true, passive: true };
     document.addEventListener('pointerdown', tryActivate, opts);
     document.addEventListener('keydown', tryActivate, opts);
@@ -173,12 +177,7 @@ export function useHeadsetMediaKeys(opts: UseHeadsetOptions): UseHeadsetResult {
   }, [enabled, isActive]);
 
   /**
-   * playbackState an Voice-State syncen, damit das Headset richtig toggled:
-   * - Recording / Responding → 'playing' (Pause-Taste sendet pause-Action)
-   * - Sonst → 'paused' (Play-Taste sendet play-Action)
-   *
-   * Beide Actions laufen bei uns auf denselben Handler, das ist nur für
-   * korrekte Toggle-Semantik wichtig.
+   * voiceState-Wechsel: kritischer Effect für mehrfache Nutzung.
    */
   useEffect(() => {
     if (!isActive) return;
@@ -186,12 +185,25 @@ export function useHeadsetMediaKeys(opts: UseHeadsetOptions): UseHeadsetResult {
     if (!('mediaSession' in navigator)) return;
 
     const isVoiceActive = voiceState === 'recording' || voiceState === 'responding';
+
     navigator.mediaSession.playbackState = isVoiceActive ? 'playing' : 'paused';
+    setHandlers();
+
+    if (isVoiceActive) {
+      stopSilentLoop();
+    } else {
+      const timer = setTimeout(() => {
+        if (voiceStateRef.current !== 'recording' &&
+            voiceStateRef.current !== 'responding') {
+          startSilentLoop();
+        }
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voiceState, isActive]);
 
-  /**
-   * Bei enabled=false: Cleanup.
-   */
+  /** Bei enabled=false: Cleanup */
   useEffect(() => {
     if (enabled) return;
     if (audioRef.current) {
@@ -205,15 +217,14 @@ export function useHeadsetMediaKeys(opts: UseHeadsetOptions): UseHeadsetResult {
       try {
         navigator.mediaSession.setActionHandler('play', null);
         navigator.mediaSession.setActionHandler('pause', null);
+        try { navigator.mediaSession.setActionHandler('stop', null); } catch {}
       } catch {}
       navigator.mediaSession.playbackState = 'none';
     }
     setIsActive(false);
   }, [enabled]);
 
-  /**
-   * Cleanup bei Unmount.
-   */
+  /** Cleanup bei Unmount */
   useEffect(() => {
     return () => {
       if (audioRef.current) {
@@ -227,6 +238,7 @@ export function useHeadsetMediaKeys(opts: UseHeadsetOptions): UseHeadsetResult {
         try {
           navigator.mediaSession.setActionHandler('play', null);
           navigator.mediaSession.setActionHandler('pause', null);
+          try { navigator.mediaSession.setActionHandler('stop', null); } catch {}
         } catch {}
       }
     };

@@ -288,6 +288,8 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.headset.activeStatus': 'Bereit - Tastendruck wird erkannt',
     'settings.headset.pendingActivation': 'Wird beim ersten Tippen auf die App aktiviert',
     'settings.headset.hint': 'Funktioniert mit Bluetooth-Headsets (AirPods, Bose, Sony etc.) und Tastatur-Media-Tasten. Auf iOS Safari ggf. erst nach einigen Sekunden.',
+    'clearDialog.title': 'Verlauf löschen',
+    'clearDialog.confirm': 'Verlauf wirklich löschen? Diese Aktion kann nicht rückgängig gemacht werden.',
 'common.close': 'Schließen',
   },
 
@@ -438,6 +440,8 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.headset.activeStatus': 'Ready - button press detected',
     'settings.headset.pendingActivation': 'Will activate on first tap in the app',
     'settings.headset.hint': 'Works with Bluetooth headsets (AirPods, Bose, Sony etc.) and keyboard media keys. May take a few seconds on iOS Safari.',
+    'clearDialog.title': 'Clear history',
+    'clearDialog.confirm': 'Really delete history? This action cannot be undone.',
 'common.close': 'Close',
   },
 
@@ -588,6 +592,8 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.headset.activeStatus': 'Pronto - pressione tasto rilevata',
     'settings.headset.pendingActivation': 'Verrà attivato al primo tocco nell\'app',
     'settings.headset.hint': 'Funziona con cuffie Bluetooth (AirPods, Bose, Sony ecc.) e tasti multimediali della tastiera. Su iOS Safari potrebbero servire alcuni secondi.',
+    'clearDialog.title': 'Cancella cronologia',
+    'clearDialog.confirm': 'Cancellare davvero la cronologia? Questa azione non può essere annullata.',
 'common.close': 'Chiudi',
   },
 
@@ -738,6 +744,8 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.headset.activeStatus': 'Prêt - pression de touche détectée',
     'settings.headset.pendingActivation': 'Sera activé au premier toucher dans l\'app',
     'settings.headset.hint': 'Fonctionne avec les casques Bluetooth (AirPods, Bose, Sony etc.) et les touches multimédia du clavier. Sur iOS Safari, cela peut prendre quelques secondes.',
+    'clearDialog.title': 'Effacer l\'historique',
+    'clearDialog.confirm': 'Vraiment effacer l\'historique ? Cette action ne peut pas être annulée.',
 'common.close': 'Fermer',
   },
 
@@ -888,6 +896,8 @@ export const TRANSLATIONS: Record<Locale, Dictionary> = {
     'settings.headset.activeStatus': 'Listo - pulsación de botón detectada',
     'settings.headset.pendingActivation': 'Se activará al primer toque en la app',
     'settings.headset.hint': 'Funciona con auriculares Bluetooth (AirPods, Bose, Sony etc.) y teclas multimedia del teclado. En iOS Safari puede tardar unos segundos.',
+    'clearDialog.title': 'Borrar historial',
+    'clearDialog.confirm': '¿Borrar realmente el historial? Esta acción no se puede deshacer.',
 'common.close': 'Cerrar',
   },
 };

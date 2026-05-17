@@ -190,19 +190,26 @@ function buildSystemTools(_agentName: string): any[] {
       name: 'start_translation_mode',
       description:
         'Aktiviert den bidirektionalen Dolmetscher-Modus. ' +
-        'Aufrufen wenn der Nutzer eine Übersetzungs-Anfrage stellt ("Übersetzung starten", ' +
-        '"translation mode", "Dolmetscher", "ins Polnische übersetzen" etc.). ' +
-        'WANN AUFRUFEN: (1) Direkt wenn Nutzer eine Sprache nennt zusammen mit Übersetzungs-Wunsch ' +
-        '("Übersetze ins Polnische") - sofort aufrufen. (2) Nach einer Rückfrage "In welche Sprache?" ' +
-        'sobald der Nutzer eine Sprache nennt - sofort aufrufen, NICHT weiter unterhalten. ' +
-        'targetLanguage: Sprache als deutsches/englisches Wort ("Polnisch", "Polish", "Türkisch"). ' +
-        'Falls Nutzer Sprache nicht kennt: "unknown".',
+        '\n\nWICHTIG: Rufe dieses Tool NUR auf wenn der Nutzer eine konkrete Sprache genannt hat. ' +
+        'Wenn der Nutzer nur "Übersetzung starten" / "translation mode" / "Dolmetscher" sagt OHNE Sprache zu nennen, ' +
+        'rufe das Tool NICHT auf - frage stattdessen verbal "In welche Sprache möchten Sie übersetzen?" und ' +
+        'warte auf die Antwort. ERST WENN der Nutzer eine Sprache nennt (auch als alleiniges Wort wie "Polnisch"), ' +
+        'rufe start_translation_mode mit dieser Sprache auf. ' +
+        '\n\nBeispiele für gültige Aufrufe: ' +
+        '- "Übersetze ins Polnische" → start_translation_mode(targetLanguage="Polnisch") ' +
+        '- "translation to Turkish" → start_translation_mode(targetLanguage="Turkish") ' +
+        '- Nach Frage "In welche Sprache?" antwortet User "Englisch" → start_translation_mode(targetLanguage="Englisch") ' +
+        '\n\nBeispiele für UNGÜLTIGE Aufrufe (NICHT machen): ' +
+        '- "Übersetzung starten" alleine → KEIN Tool-Aufruf, erst nach Sprache fragen ' +
+        '- "Gehe in den Übersetzungsmodus" → KEIN Tool-Aufruf, erst nach Sprache fragen ' +
+        '- targetLanguage="unknown" oder "?" → wird abgelehnt, also gar nicht erst versuchen',
       parameters: {
         type: 'object',
         properties: {
           targetLanguage: {
             type: 'string',
-            description: 'Die Zielsprache als Wort (z.B. "Polnisch", "Türkisch", "Englisch") oder "unknown".',
+            description: 'Die konkrete Zielsprache als Wort (z.B. "Polnisch", "Türkisch", "Englisch"). ' +
+              'Niemals "unknown" oder leer - dann lieber zuerst nachfragen.',
           },
         },
         required: ['targetLanguage'],

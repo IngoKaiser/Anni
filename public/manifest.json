@@ -1,11 +1,28 @@
 {
-  "name": "Anni - deine persönliche Assistentin",
+  "name": "Anni - dein persönlicher Assistent",
   "short_name": "Anni",
-  "description": "Sprach-Assistenz für deinen Pflege-Alltag",
+  "description": "Sprach-Assistenz für deinen Pflege-Alltag. Dokumentiere Einsätze und schlage Pflegewissen per Stimme nach.",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#FFFFFF",
-  "theme_color": "#FFFFFF",
+  "theme_color": "#9F1239",
   "orientation": "portrait",
-  "icons": []
+  "categories": ["health", "productivity", "medical"],
+  "lang": "de",
+  "dir": "ltr",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
 }

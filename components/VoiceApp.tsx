@@ -12,6 +12,7 @@ import type { PublicTenantConfig } from '@/lib/tenants';
 import { useSpeechSynthesis } from '@/lib/use-speech-synthesis';
 import { useUserSettings, OPENAI_VOICES, LISTEN_TIMEOUT_MIN, LISTEN_TIMEOUT_MAX, vadSensitivityToParams } from '@/lib/use-user-settings';
 import { useHeadsetMediaKeys } from '@/lib/use-headset-mediakeys';
+import { useTurnHistory } from '@/lib/use-turn-history';
 import { useI18n, SUPPORTED_LOCALES, buildVoicePreviewText, type Locale } from '@/lib/i18n';
 import VoicePicker from './VoicePicker';
 
@@ -183,7 +184,37 @@ export default function VoiceApp({ tenant, user }: Props) {
   const { t, locale, setLocale, setAgentName } = useI18n();
 
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
-  const [turns, setTurns] = useState<Turn[]>([]);
+
+  // Translator-Mode-State zuerst definieren - turns hängt davon ab welche
+  // History wir gerade nutzen.
+  const [translatorActive, setTranslatorActive] = useState(false);
+  const [translatorTarget, setTranslatorTarget] = useState<{
+    label: string;
+    code?: string;
+    flag?: string;
+    nativeLabel?: string;
+  } | null>(null);
+
+  // Tool-Bestätigung: wenn das Modell ein schreibendes Tool aufrufen will,
+  // halten wir den Call hier zwischen bis der User per Voice ("Ja"/"Nein")
+  // oder per Klick auf der Card bestätigt/ablehnt.
+  const [pendingTool, setPendingTool] = useState<{
+    callId: string;
+    toolId: string;
+    toolLabel: string;
+    args: any;
+    summary: string;
+    cardTurnId: number;
+  } | null>(null);
+
+  // Persistente Turn-Historie via localStorage. Separat pro Modus.
+  // Demo-User (kein Email) bekommt keine Persistenz - nur im Speicher.
+  const historyUserKey = user.email && !user.isDemoUser ? user.email : null;
+  const historyMode = translatorActive ? 'translator' : 'standard';
+  const history = useTurnHistory(historyUserKey, historyMode);
+  const turns = history.turns as Turn[];
+  const setTurns = history.setTurns as React.Dispatch<React.SetStateAction<Turn[]>>;
+
   const [audioLevel, setAudioLevel] = useState(0);
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
@@ -206,27 +237,8 @@ export default function VoiceApp({ tenant, user }: Props) {
     setDebugLog(prev => [...prev.slice(-49), `${ts} ${msg}`]);
   }, []);
 
-  // Translator-Mode-State
-  const [translatorActive, setTranslatorActive] = useState(false);
-  const [translatorTarget, setTranslatorTarget] = useState<{
-    label: string;
-    code?: string;
-    flag?: string;
-    nativeLabel?: string;
-  } | null>(null);
-
-  // Tool-Bestätigung: wenn das Modell ein schreibendes Tool aufrufen will,
-  // halten wir den Call hier zwischen bis der User per Voice ("Ja"/"Nein")
-  // oder per Klick auf der Card bestätigt/ablehnt.
-  // null = nichts pending, sonst die Tool-Call-Daten + visible Card-ID
-  const [pendingTool, setPendingTool] = useState<{
-    callId: string;
-    toolId: string;
-    toolLabel: string;
-    args: any;
-    summary: string;       // Strukturierte Zusammenfassung was getan wird
-    cardTurnId: number;    // Welcher Turn die Bestätigungs-Card rendert
-  } | null>(null);
+  // Translator-Mode-State, Tool-Confirmation-State und Turn-Historie sind
+  // weiter oben definiert (vor dem History-Hook).
 
   const idCounter = useRef(0);
   const dialogEndRef = useRef<HTMLDivElement>(null);
@@ -628,9 +640,29 @@ export default function VoiceApp({ tenant, user }: Props) {
 
     // System-Tool: Translator starten
     if (toolName === 'start_translation_mode') {
-      const target = typeof args?.targetLanguage === 'string' && args.targetLanguage.length > 0
-        ? args.targetLanguage
-        : 'unknown';
+      const target = typeof args?.targetLanguage === 'string' ? args.targetLanguage.trim() : '';
+
+      // Kein gültiger Sprach-Wert → wir lehnen den Aufruf ab und fordern
+      // das Modell auf nachzufragen. Sonst würden wir den Modus mit
+      // "unbekannt"-Übersetzung starten, was nutzlos ist.
+      // Auch "unknown"-Strings die das Modell selbst sendet werden abgelehnt -
+      // das Modell soll dann explizit die Frage stellen.
+      const isInvalid = !target ||
+        /^(unknown|unbekannt|inconnu|sconosciuto|desconocido)$/i.test(target);
+
+      if (isInvalid) {
+        debugAdd(`✗ start_translation_mode REJECTED: no target language ("${target}")`);
+        sendToolRejection(
+          callId,
+          'Translation target language is missing or unknown. ' +
+          'Do NOT activate translation mode yet. ' +
+          'Instead, ask the user politely: "In welche Sprache möchten Sie übersetzen?" ' +
+          '(or the equivalent in the user\'s language). ' +
+          'When the user names a language, call start_translation_mode again with that language.'
+        );
+        return;
+      }
+
       debugAdd(`→ start_translation_mode target="${target}"`);
       setVoiceState('connecting');
       cleanupRealtime();
@@ -646,7 +678,9 @@ export default function VoiceApp({ tenant, user }: Props) {
       cleanupRealtime();
       setTranslatorActive(false);
       setTranslatorTarget(null);
-      setTurns([]);
+      // setTurns([]) hier WEGGELASSEN: durch den Mode-Wechsel lädt der
+      // useTurnHistory-Hook automatisch die Standard-Historie neu.
+      // Die Translator-Historie bleibt im localStorage erhalten.
       setVoiceState('idle');
       return;
     }
@@ -828,8 +862,11 @@ export default function VoiceApp({ tenant, user }: Props) {
     // lesbar bleibt - die geben keine Aufschlüsse über Tool-Calls.
     if (ev?.type &&
         !ev.type.startsWith('response.audio.') &&
+        !ev.type.startsWith('response.output_audio.delta') &&
         !ev.type.startsWith('response.audio_transcript.delta') &&
+        !ev.type.startsWith('response.output_audio_transcript.delta') &&
         !ev.type.startsWith('response.text.delta') &&
+        !ev.type.startsWith('response.output_text.delta') &&
         ev.type !== 'response.function_call_arguments.delta' &&
         ev.type !== 'output_audio_buffer.audio_started' &&
         ev.type !== 'output_audio_buffer.audio_stopped') {
@@ -879,17 +916,72 @@ export default function VoiceApp({ tenant, user }: Props) {
         }
         break;
       case 'response.created':
+      case 'response.output_item.added': {
+        // GA-API: response.output_item.added kommt zuverlässiger als response.created
+        // (response.created fehlt manchmal komplett). Wir wollen einen Assistant-Turn
+        // anlegen sobald die Antwort beginnt - egal welches der beiden Events kommt.
+        // Wenn aber schon ein Turn existiert (z.B. weil das andere Event vorher
+        // kam), legen wir keinen neuen an.
+        if (currentAssistantTurnRef.current) {
+          break;
+        }
+        // Bei output_item.added: nur wenn es ein 'message'-Item ist (nicht
+        // function_call, das ist ein anderer Pfad)
+        if (ev.type === 'response.output_item.added' &&
+            ev.item?.type && ev.item.type !== 'message') {
+          break;
+        }
         const assistTurn: Turn = { id: ++idCounter.current, role: 'assistant', text: '', timestamp: Date.now() };
         currentAssistantTurnRef.current = assistTurn;
-        // Aktive Response-ID merken für sauberen Interrupt
         activeResponseIdRef.current = ev.response?.id || 'pending';
         setTurns(prev => [...prev, assistTurn]);
         setVoiceState('responding');
+        debugAdd(`assistant turn created (via ${ev.type})`);
         break;
+      }
+      // Assistant-Transcript-Deltas. GA-API nutzt response.output_audio_transcript.delta,
+      // Beta-API hieß response.audio_transcript.delta. Wir behandeln beide für Robustheit.
+      // Genauso für Text-Output (kommt selten bei Voice-Sessions vor, aber Standard).
       case 'response.audio_transcript.delta':
+      case 'response.output_audio_transcript.delta':
+      case 'response.text.delta':
+      case 'response.output_text.delta':
+        // Falls noch kein Turn existiert (response.created/output_item.added wurden
+        // übersprungen): jetzt anlegen. Sonst gehen die Deltas ins Leere.
+        if (!currentAssistantTurnRef.current) {
+          const assistTurn: Turn = { id: ++idCounter.current, role: 'assistant', text: '', timestamp: Date.now() };
+          currentAssistantTurnRef.current = assistTurn;
+          activeResponseIdRef.current = ev.response_id || ev.response?.id || 'pending';
+          setTurns(prev => [...prev, assistTurn]);
+          setVoiceState('responding');
+          debugAdd(`assistant turn created (lazy via ${ev.type})`);
+        }
         if (currentAssistantTurnRef.current) {
           const id = currentAssistantTurnRef.current.id;
-          setTurns(prev => prev.map(t => t.id === id ? { ...t, text: t.text + ev.delta } : t));
+          setTurns(prev => prev.map(t => t.id === id ? { ...t, text: t.text + (ev.delta || '') } : t));
+        }
+        break;
+      // Final-Transcript-Events (manchmal kommt nur done, kein Delta)
+      case 'response.audio_transcript.done':
+      case 'response.output_audio_transcript.done':
+      case 'response.text.done':
+      case 'response.output_text.done':
+        if (typeof ev.transcript === 'string' || typeof ev.text === 'string') {
+          const finalText = ev.transcript || ev.text || '';
+          // Falls Turn existiert und bisher leer ist: mit Final-Text füllen
+          if (currentAssistantTurnRef.current) {
+            const id = currentAssistantTurnRef.current.id;
+            setTurns(prev => prev.map(t =>
+              t.id === id && (!t.text || t.text.length < finalText.length)
+                ? { ...t, text: finalText }
+                : t
+            ));
+          } else if (finalText) {
+            // Kein Turn vorhanden - jetzt mit Final-Text anlegen
+            const assistTurn: Turn = { id: ++idCounter.current, role: 'assistant', text: finalText, timestamp: Date.now() };
+            setTurns(prev => [...prev, assistTurn]);
+            debugAdd(`assistant turn created (done-event with text)`);
+          }
         }
         break;
       case 'response.function_call_arguments.delta':
@@ -1037,8 +1129,10 @@ export default function VoiceApp({ tenant, user }: Props) {
           flag: session.targetLanguageFlag,
           nativeLabel: session.targetLanguageNative,
         });
-        // Im Translator-Mode den Dialog-Verlauf NICHT übernehmen (eigener Kontext)
-        setTurns([]);
+        // Translator-Historie ist separat persistiert (in localStorage),
+        // wird durch den useTurnHistory-Mode-Wechsel automatisch geladen.
+        // Wir setzen turns NICHT manuell auf [] - das würde die persistierte
+        // Translator-History überschreiben sobald der Hook re-syncs.
       }
 
       const ephemeralKey = session.ephemeralToken;
@@ -1221,7 +1315,8 @@ export default function VoiceApp({ tenant, user }: Props) {
   };
 
   const clearDialog = () => {
-    setTurns([]);
+    // history.clearTurns löscht persistente Turns + den State.
+    history.clearTurns();
     setDemoStep(0);
     stopSpeech();
   };
@@ -1305,7 +1400,8 @@ export default function VoiceApp({ tenant, user }: Props) {
               cleanupRealtime();
               setTranslatorActive(false);
               setTranslatorTarget(null);
-              setTurns([]);
+              // Translator-Historie bleibt im localStorage erhalten, wird beim
+              // Wiedereinstieg in den Modus geladen.
               setVoiceState('idle');
             }}
             className="px-3 py-1.5 rounded-full bg-white/20 hover:bg-white/30 backdrop-blur text-white text-xs font-medium transition flex items-center gap-1.5 shrink-0"
@@ -1342,7 +1438,15 @@ export default function VoiceApp({ tenant, user }: Props) {
               {audioEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}
             </button>
             {turns.length > 0 && (
-              <button onClick={clearDialog} className="w-10 h-10 rounded-2xl bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center justify-center transition">
+              <button
+                onClick={() => {
+                  if (window.confirm(t('clearDialog.confirm'))) {
+                    clearDialog();
+                  }
+                }}
+                title={t('clearDialog.title')}
+                className="w-10 h-10 rounded-2xl bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center justify-center transition"
+              >
                 <Trash2 size={16} />
               </button>
             )}
